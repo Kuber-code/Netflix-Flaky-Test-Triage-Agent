@@ -12,6 +12,10 @@ runner = CliRunner()
 # that renaming or dropping a command is a deliberate, visible change.
 EXPECTED_COMMANDS = frozenset({"ingest", "detect", "triage", "report", "policy", "eval", "stats"})
 
+# Commands whose behaviour is not built yet. They must fail explicitly rather
+# than exit 0 and look like an empty result. Shrinks as phases land.
+UNIMPLEMENTED_COMMANDS = frozenset({"detect", "triage", "report", "policy", "eval", "stats"})
+
 
 def test_version() -> None:
     result = runner.invoke(app, ["--version"])
@@ -34,11 +38,12 @@ def test_bare_invocation_shows_help_and_does_not_crash() -> None:
     assert not isinstance(result.exception, Exception)
 
 
-@pytest.mark.parametrize("command", sorted(EXPECTED_COMMANDS))
+@pytest.mark.parametrize("command", sorted(UNIMPLEMENTED_COMMANDS))
 def test_unimplemented_commands_fail_explicitly(command: str) -> None:
     """An unimplemented command must not exit 0 and look like an empty result."""
     result = runner.invoke(app, [command])
     assert result.exit_code == 2, result.output
+    assert "not implemented" in result.output
 
 
 @pytest.mark.parametrize("command", sorted(EXPECTED_COMMANDS))

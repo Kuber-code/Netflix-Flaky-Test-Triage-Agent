@@ -1,0 +1,7 @@
+<?xml version="1.0"?>
+<!DOCTYPE testsuites [
+  <!ENTITY a "aaaaaaaaaa">
+  <!ENTITY b "&a;&a;&a;&a;&a;&a;&a;&a;&a;&a;">
+  <!ENTITY c "&b;&b;&b;&b;&b;&b;&b;&b;&b;&b;">
+]>
+<testsuites><testsuite name="&c;"><testcase name="boom"/></testsuite></testsuites>

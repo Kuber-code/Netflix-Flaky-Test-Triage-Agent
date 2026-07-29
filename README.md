@@ -60,18 +60,40 @@ Consequences that are enforced in code rather than asserted in prose:
 ```bash
 make install                       # uv sync --all-groups
 make check                         # ruff, mypy --strict, pytest
-uv run flaketriage --help
+uv run flaketriage ingest --results ./reports --sha "$SHA" --run-id "$RUN_ID" --attempt 1
 ```
 
 On Windows, where GNU make is not present, `.\make.ps1 check` runs the same gate.
+
+`ingest` accepts files, directories or globs — globs are expanded in-process
+because PowerShell and cmd do not expand them. Re-ingesting the same run,
+attempt and shard is a no-op rather than a duplicate: CI retries ingest steps,
+and double-counting observations would corrupt every flake rate downstream.
+
+### What the ingest layer handles
+
+Five JUnit dialects are covered by fixtures and tests — pytest, Maven Surefire,
+jest-junit, Playwright, and reporters that nest `<testsuite>` elements to model
+describe blocks. "JUnit XML" is a family of dialects rather than a schema, so
+each is exercised separately:
+
+- `failure` and `error` are kept distinct, because an assertion failure points at
+  the code under test while a harness error more often points at infrastructure.
+- Surefire's `<flakyFailure>` is recorded as a rerun observation: same-SHA
+  outcome divergence asserted by the test runner itself.
+- Truncated XML — what a killed worker leaves behind — yields the cases parsed
+  before the truncation point plus a persisted warning. Losing a whole run's
+  results because the closing tag is missing is strictly worse than partial data.
+- A `DOCTYPE` is refused outright. It has no legitimate purpose in a CI artifact
+  and is the vector for entity-expansion attacks.
 
 ## Build status
 
 | Phase | Deliverable | Status |
 |---|---|---|
 | P0 | Scaffolding: uv project, ruff/mypy/pytest, Makefile, CI, CLI surface | done |
-| P1 | Ingest: JUnit XML, diff parser, SQLite schema | pending |
-| P2 | Identity: fingerprinting, parameterization, alias resolution | pending |
+| P1 | Ingest: JUnit XML, diff parser, SQLite schema, `ingest` | done |
+| P2 | Identity: alias resolution across renames | pending |
 | P3 | Detector: four signals, regression path, confidence levels | pending |
 | P4 | Classifier: schema validation, repair retry, abstention, cache | pending |
 | P5 | Evaluation harness, labeled corpus, baseline, results table | pending |

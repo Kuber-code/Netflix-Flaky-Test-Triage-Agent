@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Maven Surefire. Note <flakyFailure>: the runner retried the case within a
+     single run and it passed on retry. That is same-SHA outcome divergence
+     asserted by the test runner itself, which is the strongest signal there is. -->
+<testsuite xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+           name="com.example.orders.OrderServiceTest"
+           time="6.884" tests="4" errors="1" skipped="0" failures="1">
+  <properties>
+    <property name="java.version" value="21.0.2"/>
+  </properties>
+  <testcase name="reservesInventory" classname="com.example.orders.OrderServiceTest"
+            time="0.512"/>
+  <testcase name="chargesCardOnce" classname="com.example.orders.OrderServiceTest"
+            time="1.204">
+    <flakyFailure message="expected:&lt;1&gt; but was:&lt;2&gt;" type="java.lang.AssertionError">
+java.lang.AssertionError: expected:&lt;1&gt; but was:&lt;2&gt;
+	at com.example.orders.OrderServiceTest.chargesCardOnce(OrderServiceTest.java:88)
+	at java.base/java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:642)
+    </flakyFailure>
+  </testcase>
+  <testcase name="appliesDiscount" classname="com.example.orders.OrderServiceTest"
+            time="0.334">
+    <failure message="expected:&lt;9.00&gt; but was:&lt;10.00&gt;" type="java.lang.AssertionError">
+java.lang.AssertionError: expected:&lt;9.00&gt; but was:&lt;10.00&gt;
+	at com.example.orders.OrderServiceTest.appliesDiscount(OrderServiceTest.java:141)
+    </failure>
+  </testcase>
+  <testcase name="refundsOnFailure" classname="com.example.orders.OrderServiceTest"
+            time="4.834">
+    <error message="Connection refused: payments-stub:8080" type="java.net.ConnectException">
+java.net.ConnectException: Connection refused: payments-stub:8080
+	at java.base/sun.nio.ch.Net.pollConnect(Native Method)
+	at com.example.orders.PaymentsClient.charge(PaymentsClient.java:47)
+    </error>
+    <system-err>WARN  PaymentsClient - retry 3/3 failed, giving up</system-err>
+  </testcase>
+</testsuite>

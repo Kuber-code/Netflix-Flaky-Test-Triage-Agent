@@ -68,7 +68,9 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["S101", "ANN201", "ARG001", "T20"]
+# Fixture data legitimately contains the characters reporters actually emit
+# (Playwright's U+203A separator), so ambiguous-unicode is off for tests.
+"tests/**" = ["S101", "ANN201", "ARG001", "T20", "RUF001"]
 "eval/**" = ["T20"]
 
 [tool.mypy]
@@ -86,6 +88,9 @@ ignore_missing_imports = true
 minversion = "8.0"
 testpaths = ["tests"]
 addopts = "-q --strict-markers --strict-config"
+# Every test is a plain function. Class collection is disabled outright so that
+# domain types named TestCaseResult / TestIdentity are not mistaken for suites.
+python_classes = []
 
 [tool.coverage.run]
 source = ["src/flaketriage"]

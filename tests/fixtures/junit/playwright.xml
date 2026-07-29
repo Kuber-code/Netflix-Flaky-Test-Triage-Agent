@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Playwright's junit reporter. Captured output is attached to the suite, not
+     the case, so case-level stdout has to fall back to the suite's. -->
+<testsuites id="" name="" tests="3" failures="1" skipped="1" errors="0" time="31.882">
+  <testsuite name="e2e/checkout.spec.ts" timestamp="2026-07-20T10:44:11.002Z"
+             hostname="chromium" tests="3" failures="1" skipped="1" time="31.882" errors="0">
+    <testcase name="checkout › applies a coupon code"
+              classname="e2e/checkout.spec.ts:14:5 › checkout › applies a coupon code"
+              time="6.104"/>
+    <testcase name="checkout › blocks an expired coupon"
+              classname="e2e/checkout.spec.ts:31:5 › checkout › blocks an expired coupon"
+              time="24.778">
+      <failure message="e2e/checkout.spec.ts:31:5 blocks an expired coupon" type="FAILURE">
+Error: locator.click: Timeout 20000ms exceeded.
+Call log:
+  - waiting for getByRole('button', { name: 'Apply' })
+
+    at e2e/checkout.spec.ts:38:41
+      </failure>
+    </testcase>
+    <testcase name="checkout › shows a receipt"
+              classname="e2e/checkout.spec.ts:52:5 › checkout › shows a receipt" time="1.0">
+      <skipped/>
+    </testcase>
+    <system-out>Downloading browser chromium-1140 - 158.1 MiB [====] 100%</system-out>
+  </testsuite>
+</testsuites>

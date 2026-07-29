@@ -10,15 +10,21 @@ stdout carries report data; stderr carries logs and diagnostics.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Final
 
 import typer
 from rich.console import Console
+from rich.table import Table
 
 from flaketriage import __version__
 from flaketriage.config import Config, load_config
+from flaketriage.ingest import expand_result_paths, parse_diff_file
+from flaketriage.ingest import ingest as run_ingest
+from flaketriage.models import RunMetadata
 from flaketriage.obs import configure_logging
+from flaketriage.store import RunStore
 
 app = typer.Typer(
     name="flaketriage",
@@ -93,16 +99,98 @@ def main(
 @app.command()
 def ingest(
     results: Annotated[
-        list[Path] | None,
-        typer.Option("--results", help="JUnit XML files or globs to ingest."),
+        list[str],
+        typer.Option(
+            "--results",
+            help="JUnit XML files, directories or globs. Repeatable.",
+        ),
+    ],
+    sha: Annotated[str, typer.Option("--sha", help="Commit SHA under test.")],
+    run_id: Annotated[str, typer.Option("--run-id", help="CI run identifier.")],
+    attempt: Annotated[
+        int,
+        typer.Option(
+            "--attempt",
+            min=1,
+            help="Retry attempt number. Divergence between attempts at one SHA "
+            "is the strongest flake signal, so getting this right matters.",
+        ),
+    ] = 1,
+    branch: Annotated[str | None, typer.Option("--branch", help="Branch under test.")] = None,
+    shard: Annotated[
+        str | None,
+        typer.Option("--shard", help="Shard id; order-dependent flakes cluster by shard."),
     ] = None,
-    sha: Annotated[str | None, typer.Option("--sha", help="Commit SHA under test.")] = None,
-    run_id: Annotated[str | None, typer.Option("--run-id", help="CI run identifier.")] = None,
-    attempt: Annotated[int, typer.Option("--attempt", help="Retry attempt number.")] = 1,
+    worker: Annotated[str | None, typer.Option("--worker", help="Worker or runner id.")] = None,
+    diff_file: Annotated[
+        Path | None,
+        typer.Option(
+            "--diff",
+            help="Unified diff (git diff --unified=0) for this change.",
+            exists=True,
+            dir_okay=False,
+        ),
+    ] = None,
+    started_at: Annotated[
+        datetime | None,
+        typer.Option("--started-at", help="Run start time. Defaults to now, in UTC."),
+    ] = None,
 ) -> None:
-    """Parse test results and persist them to the run store."""
-    del results, sha, run_id, attempt
-    _not_implemented("ingest", "P1")
+    """Parse test results and persist them to the run store.
+
+    Re-ingesting the same run, attempt and shard is a no-op rather than a
+    duplicate: CI retries ingest steps, and double-counting observations would
+    corrupt every flake rate downstream.
+    """
+    paths = expand_result_paths(results)
+    if not paths:
+        stderr.print(
+            f"[red]No result files matched[/red] {', '.join(results)}. Nothing was ingested."
+        )
+        raise typer.Exit(1)
+
+    metadata = RunMetadata(
+        commit_sha=sha,
+        run_id=run_id,
+        attempt=attempt,
+        branch=branch,
+        shard_id=shard,
+        worker_id=worker,
+        started_at=_as_utc(started_at),
+    )
+
+    diff_result = parse_diff_file(diff_file) if diff_file is not None else None
+
+    with RunStore.open(state.config.store_path()) as store:
+        summary = run_ingest(
+            store,
+            metadata,
+            paths,
+            diff=diff_result,
+            extra_warnings=diff_result.warnings if diff_result is not None else (),
+        )
+
+    table = Table(title=f"Ingested {sha[:12]} (run {run_id}, attempt {attempt})", box=None)
+    table.add_column("metric")
+    table.add_column("value", justify="right")
+    table.add_row("result files", str(len(paths)))
+    table.add_row("executions recorded", str(summary.cases_ingested))
+    table.add_row("duplicates skipped", str(summary.cases_skipped_duplicate))
+    table.add_row("new test identities", str(summary.new_identities))
+    table.add_row("diff files", str(summary.diff_files))
+    table.add_row("parse warnings", str(len(summary.warnings)))
+    stdout.print(table)
+
+    # Warnings are surfaced, not buried: a half-truncated result file means the
+    # run's data is incomplete and any flake rate computed from it is suspect.
+    for warning in summary.warnings:
+        stderr.print(f"[yellow]warning[/yellow] {warning.reason}: {warning.origin}")
+
+
+def _as_utc(value: datetime | None) -> datetime:
+    if value is None:
+        return datetime.now(UTC)
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
 
 @app.command()

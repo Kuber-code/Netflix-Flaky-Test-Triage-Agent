@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Reporters that model describe blocks structurally nest <testsuite>
+     elements, and the nesting is the only place the test's context lives: the
+     case names alone ("handles retries") are meaningless without it.
+     Also exercises namespace-prefixed tags, which a few reporters emit. -->
+<ts:testsuites xmlns:ts="http://example.com/junit" name="integration">
+  <ts:testsuite name="api" file="test/api.spec.js" tests="3" failures="1" time="4.9">
+    <ts:testsuite name="orders" tests="2" failures="1" time="3.1">
+      <ts:testcase name="creates an order" time="0.9"/>
+      <ts:testcase name="handles retries" time="2.2">
+        <ts:failure message="expected 500 to equal 200" type="AssertionError">
+AssertionError: expected 500 to equal 200
+    at Context.&lt;anonymous&gt; (test/api.spec.js:61:34)
+        </ts:failure>
+      </ts:testcase>
+    </ts:testsuite>
+    <ts:testsuite name="health" tests="1" failures="0" time="1.8">
+      <ts:testcase name="reports ready" time="1.8"/>
+    </ts:testsuite>
+  </ts:testsuite>
+</ts:testsuites>

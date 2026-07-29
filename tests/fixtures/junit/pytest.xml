@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<testsuites>
+  <testsuite name="pytest" errors="1" failures="1" skipped="1" tests="5" time="4.118"
+             timestamp="2026-07-20T10:14:02.311284" hostname="runner-3">
+    <testcase classname="tests.unit.test_login" name="test_login_succeeds"
+              file="tests/unit/test_login.py" line="11" time="0.041"/>
+    <testcase classname="tests.unit.test_login" name="test_login_retries[user=alice]"
+              file="tests/unit/test_login.py" line="24" time="1.502">
+      <failure message="AssertionError: expected status 200, got 503" type="AssertionError">
+self = &lt;tests.unit.test_login.TestLogin object at 0x7f2c1d0&gt;
+
+    def test_login_retries(self, user):
+        response = self.client.post("/login", json={"user": user})
+&gt;       assert response.status_code == 200
+E       AssertionError: expected status 200, got 503
+
+tests/unit/test_login.py:27: AssertionError
+      </failure>
+    </testcase>
+    <testcase classname="tests.unit.test_login" name="test_login_retries[user=bob]"
+              file="tests/unit/test_login.py" line="24" time="0.088"/>
+    <testcase classname="tests.integration.test_orders" name="test_order_placement"
+              file="tests/integration/test_orders.py" line="52" time="2.401">
+      <error message="ConnectionResetError: [Errno 104] Connection reset by peer"
+             type="ConnectionResetError">
+tests/integration/test_orders.py:58: in test_order_placement
+    resp = session.post(ORDERS_URL, json=payload)
+ConnectionResetError: [Errno 104] Connection reset by peer
+      </error>
+      <system-err>urllib3.connectionpool WARNING - Retrying (Retry(total=2)) after connection broken</system-err>
+    </testcase>
+    <testcase classname="tests.unit.test_flags" name="test_beta_flag"
+              file="tests/unit/test_flags.py" line="8" time="0.001">
+      <skipped message="requires FEATURE_BETA" type="pytest.skip">Skipped: requires FEATURE_BETA</skipped>
+    </testcase>
+  </testsuite>
+</testsuites>

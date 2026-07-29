@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<testsuites>
+  <testsuite name="pytest" tests="4" failures="1" time="7.2">
+    <testcase classname="tests.unit.test_cache" name="test_cache_warm" file="tests/unit/test_cache.py" line="14" time="0.203"/>
+    <testcase classname="tests.unit.test_cache" name="test_cache_evicts" file="tests/unit/test_cache.py" line="30" time="0.410">
+      <failure message="AssertionError: cache still contains 'k1'" type="AssertionError">
+tests/unit/test_cache.py:36: AssertionError
+      </failure>
+    </testcase>
+    <testcase classname="tests.unit.test_cache" name="test_cache_ttl" file="tests/unit/te

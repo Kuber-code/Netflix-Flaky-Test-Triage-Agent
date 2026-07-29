@@ -1,0 +1,424 @@
+"""Repository over the run store.
+
+All SQL lives here. Higher layers deal in domain objects, which is what makes
+the "move ``executions`` to a columnar store" migration path in
+:mod:`flaketriage.store.schema` a change to one file rather than a rewrite.
+
+Writes are idempotent. CI retries ingest steps, workflows get re-run, and an
+engineer will run the same command twice; ingesting the same ``(run_id,
+attempt, shard)`` a second time must not double a test's observation count,
+because observation counts feed flake rate.
+"""
+
+from __future__ import annotations
+
+import sqlite3
+from collections.abc import Sequence
+from datetime import UTC, datetime
+from pathlib import Path
+from types import TracebackType
+from typing import Self
+
+from flaketriage.models import (
+    DiffSummary,
+    Outcome,
+    ParseWarning,
+    RunMetadata,
+    TestCaseResult,
+    TestIdentity,
+)
+from flaketriage.obs import get_logger
+from flaketriage.store.db import connect, transaction
+
+log = get_logger(__name__)
+
+
+class ExecutionRecord:
+    """One persisted execution, joined with the run context the detector needs."""
+
+    __slots__ = (
+        "attempt",
+        "branch",
+        "commit_sha",
+        "duration_ms",
+        "execution_id",
+        "failure_message",
+        "failure_type",
+        "identity_id",
+        "outcome",
+        "rerun_observed",
+        "run_id",
+        "shard_id",
+        "stack_trace",
+        "started_at",
+    )
+
+    def __init__(self, row: sqlite3.Row) -> None:
+        self.execution_id: int = row["id"]
+        self.identity_id: int = row["identity_id"]
+        self.outcome = Outcome(row["outcome"])
+        self.duration_ms: int | None = row["duration_ms"]
+        self.failure_type: str | None = row["failure_type"]
+        self.failure_message: str | None = row["failure_message"]
+        self.stack_trace: str | None = row["stack_trace"]
+        self.rerun_observed: bool = bool(row["rerun_observed"])
+        self.run_id: str = row["run_id"]
+        self.attempt: int = row["attempt"]
+        self.commit_sha: str = row["commit_sha"]
+        self.branch: str = row["branch"]
+        self.shard_id: str = row["shard_id"]
+        self.started_at: str = row["started_at"]
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return (
+            f"ExecutionRecord(id={self.execution_id}, identity={self.identity_id}, "
+            f"outcome={self.outcome.value}, sha={self.commit_sha[:8]}, attempt={self.attempt})"
+        )
+
+
+class IngestSummary:
+    """What one ingest invocation did. Reported to the user, not just logged."""
+
+    __slots__ = (
+        "cases_ingested",
+        "cases_skipped_duplicate",
+        "diff_files",
+        "new_identities",
+        "run_pk",
+        "warnings",
+    )
+
+    def __init__(
+        self,
+        run_pk: int,
+        cases_ingested: int,
+        cases_skipped_duplicate: int,
+        new_identities: int,
+        diff_files: int,
+        warnings: tuple[ParseWarning, ...],
+    ) -> None:
+        self.run_pk = run_pk
+        self.cases_ingested = cases_ingested
+        self.cases_skipped_duplicate = cases_skipped_duplicate
+        self.new_identities = new_identities
+        self.diff_files = diff_files
+        self.warnings = warnings
+
+
+class RunStore:
+    """Read/write access to the run store."""
+
+    def __init__(self, connection: sqlite3.Connection) -> None:
+        self._connection = connection
+
+    @classmethod
+    def open(cls, path: Path) -> RunStore:
+        return cls(connect(path))
+
+    @property
+    def connection(self) -> sqlite3.Connection:
+        return self._connection
+
+    def close(self) -> None:
+        self._connection.close()
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
+        self.close()
+
+    # -- writes ------------------------------------------------------------
+
+    def record_run(self, metadata: RunMetadata) -> int:
+        """Insert or fetch the run row. Returns its primary key.
+
+        Re-ingesting the same ``(run_id, attempt, shard)`` returns the existing
+        key instead of creating a second run, so retried CI steps cannot inflate
+        observation counts.
+        """
+        now = _utc_now_iso()
+        with transaction(self._connection) as connection:
+            connection.execute(
+                """
+                INSERT INTO runs
+                    (run_id, attempt, commit_sha, branch, shard_id, worker_id,
+                     started_at, ingested_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (run_id, attempt, shard_id) DO NOTHING
+                """,
+                (
+                    metadata.run_id,
+                    metadata.attempt,
+                    metadata.commit_sha,
+                    metadata.branch or "",
+                    metadata.shard_id or "",
+                    metadata.worker_id or "",
+                    metadata.started_at.astimezone(UTC).isoformat(),
+                    now,
+                ),
+            )
+            row = connection.execute(
+                "SELECT id FROM runs WHERE run_id = ? AND attempt = ? AND shard_id = ?",
+                (metadata.run_id, metadata.attempt, metadata.shard_id or ""),
+            ).fetchone()
+        return int(row["id"])
+
+    def upsert_identity(self, identity: TestIdentity) -> tuple[int, bool]:
+        """Insert or refresh a test identity. Returns ``(id, was_created)``."""
+        now = _utc_now_iso()
+        with transaction(self._connection) as connection:
+            existing = connection.execute(
+                "SELECT id FROM test_identities WHERE fingerprint = ?",
+                (identity.fingerprint,),
+            ).fetchone()
+
+            if existing is not None:
+                connection.execute(
+                    """
+                    UPDATE test_identities
+                       SET last_seen = ?,
+                           file_path = COALESCE(?, file_path)
+                     WHERE id = ?
+                    """,
+                    (now, identity.file_path, existing["id"]),
+                )
+                return int(existing["id"]), False
+
+            cursor = connection.execute(
+                """
+                INSERT INTO test_identities
+                    (fingerprint, suite_path, test_name, parameters, file_path,
+                     first_seen, last_seen)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    identity.fingerprint,
+                    identity.suite_path,
+                    identity.test_name,
+                    identity.parameters,
+                    identity.file_path,
+                    now,
+                    now,
+                ),
+            )
+        return int(cursor.lastrowid or 0), True
+
+    def record_executions(
+        self, run_pk: int, rows: Sequence[tuple[int, TestCaseResult]]
+    ) -> tuple[int, int]:
+        """Persist executions for a run. Returns ``(inserted, skipped)``.
+
+        ``UNIQUE (run_pk, identity_id)`` plus ``DO NOTHING`` is what makes
+        re-ingest safe. A skipped row is normal, not an error.
+        """
+        now = _utc_now_iso()
+        inserted = 0
+        with transaction(self._connection) as connection:
+            for identity_id, case in rows:
+                cursor = connection.execute(
+                    """
+                    INSERT INTO executions
+                        (run_pk, identity_id, outcome, duration_ms, failure_type,
+                         failure_message, stack_trace, stdout, stderr,
+                         rerun_observed, source_file, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT (run_pk, identity_id) DO NOTHING
+                    """,
+                    (
+                        run_pk,
+                        identity_id,
+                        case.outcome.value,
+                        case.duration_ms,
+                        case.failure_type,
+                        case.failure_message,
+                        case.stack_trace,
+                        case.stdout,
+                        case.stderr,
+                        int(case.rerun_observed),
+                        case.source_file,
+                        now,
+                    ),
+                )
+                inserted += cursor.rowcount if cursor.rowcount > 0 else 0
+        return inserted, len(rows) - inserted
+
+    def record_diff(self, run_pk: int, diff: DiffSummary) -> int:
+        """Persist the diff for a run. Returns the number of files recorded."""
+        with transaction(self._connection) as connection:
+            for change in diff.files:
+                cursor = connection.execute(
+                    """
+                    INSERT INTO diff_files (run_pk, path, old_path, change_type, binary)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT (run_pk, path) DO NOTHING
+                    """,
+                    (
+                        run_pk,
+                        change.path,
+                        change.old_path,
+                        change.change_type.value,
+                        int(change.binary),
+                    ),
+                )
+                # lastrowid is stale rather than empty when DO NOTHING fires, so
+                # rowcount is the only reliable "did we insert" signal here.
+                if cursor.rowcount < 1:
+                    continue
+                diff_file_id = cursor.lastrowid
+                connection.executemany(
+                    """
+                    INSERT INTO diff_hunks (diff_file_id, side, start_line, end_line)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    [
+                        (diff_file_id, side, line_range.start, line_range.end)
+                        for side, ranges in (
+                            ("new", change.new_ranges),
+                            ("old", change.old_ranges),
+                        )
+                        for line_range in ranges
+                    ],
+                )
+        return len(diff.files)
+
+    def record_warnings(self, run_pk: int | None, warnings: Sequence[ParseWarning]) -> int:
+        now = _utc_now_iso()
+        with transaction(self._connection) as connection:
+            connection.executemany(
+                """
+                INSERT INTO parse_warnings (run_pk, origin, reason, detail, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                [(run_pk, w.origin, w.reason, w.detail, now) for w in warnings],
+            )
+        return len(warnings)
+
+    # -- reads -------------------------------------------------------------
+
+    def identity_by_fingerprint(self, value: str) -> TestIdentity | None:
+        row = self._connection.execute(
+            """
+            SELECT fingerprint, suite_path, test_name, parameters, file_path
+              FROM test_identities WHERE fingerprint = ?
+            """,
+            (value,),
+        ).fetchone()
+        return _identity_from_row(row) if row is not None else None
+
+    def identity_id_by_fingerprint(self, value: str) -> int | None:
+        row = self._connection.execute(
+            "SELECT id FROM test_identities WHERE fingerprint = ?", (value,)
+        ).fetchone()
+        return int(row["id"]) if row is not None else None
+
+    def identity_by_id(self, identity_id: int) -> TestIdentity | None:
+        row = self._connection.execute(
+            """
+            SELECT fingerprint, suite_path, test_name, parameters, file_path
+              FROM test_identities WHERE id = ?
+            """,
+            (identity_id,),
+        ).fetchone()
+        return _identity_from_row(row) if row is not None else None
+
+    def count_identities(self) -> int:
+        row = self._connection.execute("SELECT COUNT(*) AS n FROM test_identities").fetchone()
+        return int(row["n"])
+
+    def count_executions(self) -> int:
+        row = self._connection.execute("SELECT COUNT(*) AS n FROM executions").fetchone()
+        return int(row["n"])
+
+    def executions_for_identity(
+        self, identity_id: int, *, limit: int | None = None
+    ) -> list[ExecutionRecord]:
+        """Most recent executions first. ``limit`` bounds the sliding window.
+
+        SQLite reads a negative LIMIT as unbounded, which keeps this a single
+        literal statement instead of one assembled at runtime.
+        """
+        rows = self._connection.execute(
+            """
+            SELECT e.id, e.identity_id, e.outcome, e.duration_ms, e.failure_type,
+                   e.failure_message, e.stack_trace, e.rerun_observed,
+                   r.run_id, r.attempt, r.commit_sha, r.branch, r.shard_id, r.started_at
+              FROM executions e
+              JOIN runs r ON r.id = e.run_pk
+             WHERE e.identity_id = ?
+             ORDER BY r.started_at DESC, e.id DESC
+             LIMIT ?
+            """,
+            (identity_id, -1 if limit is None else limit),
+        )
+        return [ExecutionRecord(row) for row in rows]
+
+    def executions_for_run(self, run_pk: int) -> list[ExecutionRecord]:
+        rows = self._connection.execute(
+            """
+            SELECT e.id, e.identity_id, e.outcome, e.duration_ms, e.failure_type,
+                   e.failure_message, e.stack_trace, e.rerun_observed,
+                   r.run_id, r.attempt, r.commit_sha, r.branch, r.shard_id, r.started_at
+              FROM executions e
+              JOIN runs r ON r.id = e.run_pk
+             WHERE e.run_pk = ?
+             ORDER BY e.id
+            """,
+            (run_pk,),
+        )
+        return [ExecutionRecord(row) for row in rows]
+
+    def failing_identities_at_sha(self, commit_sha: str) -> list[int]:
+        """Identities with at least one non-passing outcome at a commit."""
+        rows = self._connection.execute(
+            """
+            SELECT DISTINCT e.identity_id AS identity_id
+              FROM executions e
+              JOIN runs r ON r.id = e.run_pk
+             WHERE r.commit_sha = ? AND e.outcome IN ('fail', 'error')
+             ORDER BY e.identity_id
+            """,
+            (commit_sha,),
+        )
+        return [int(row["identity_id"]) for row in rows]
+
+    def warnings_for_run(self, run_pk: int) -> list[ParseWarning]:
+        rows = self._connection.execute(
+            "SELECT origin, reason, detail FROM parse_warnings WHERE run_pk = ? ORDER BY id",
+            (run_pk,),
+        )
+        return [
+            ParseWarning(origin=row["origin"], reason=row["reason"], detail=row["detail"])
+            for row in rows
+        ]
+
+    def diff_paths_for_sha(self, commit_sha: str) -> frozenset[str]:
+        rows = self._connection.execute(
+            """
+            SELECT DISTINCT d.path AS path
+              FROM diff_files d
+              JOIN runs r ON r.id = d.run_pk
+             WHERE r.commit_sha = ?
+            """,
+            (commit_sha,),
+        )
+        return frozenset(str(row["path"]) for row in rows)
+
+
+def _identity_from_row(row: sqlite3.Row) -> TestIdentity:
+    return TestIdentity(
+        fingerprint=row["fingerprint"],
+        suite_path=row["suite_path"],
+        test_name=row["test_name"],
+        parameters=row["parameters"],
+        file_path=row["file_path"],
+    )
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(UTC).isoformat()
