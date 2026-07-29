@@ -1,0 +1,33 @@
+# Secrets
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+
+# Tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.coverage
+coverage.xml
+htmlcov/
+
+# Runtime state (the local run store is not source)
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+.flaketriage/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

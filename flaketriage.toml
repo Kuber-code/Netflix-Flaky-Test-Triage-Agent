@@ -1,0 +1,81 @@
+# flaketriage configuration.
+#
+# Every behavioural threshold lives here. There are no magic numbers in the
+# source -- if you find one, it is a bug. Secrets are NOT read from this file;
+# the Anthropic API key comes from the environment only.
+
+[store]
+# Path to the SQLite run store, relative to the working directory.
+path = ".flaketriage/store.sqlite"
+
+[detect]
+# Sliding window over which flake rate is computed, in executions per test.
+# Deliberately not "lifetime": a test fixed last week must be able to recover.
+window_executions = 50
+
+# Minimum observations before historical instability (Signal 4) may fire at all.
+min_observations = 10
+
+# Flake rate above which a test is considered historically unstable.
+flake_rate_threshold = 0.05
+
+# Smoothing factor for the exponentially weighted moving average used by
+# Signal 4. Higher = recent executions dominate more strongly.
+ewma_alpha = 0.3
+
+# A pass streak of at least this length followed by a fail streak of at least
+# this length, pivoting on one SHA, is a regression -- not a flake.
+regression_pass_streak = 3
+regression_fail_streak = 2
+
+[identity]
+# Normalized edit distance below which two test names in the same file are
+# considered a rename rather than two distinct tests.
+alias_max_distance = 0.25
+
+# Aliases inferred at or above this distance are marked merged_uncertain and
+# surfaced in output rather than silently merged.
+alias_certain_distance = 0.10
+
+[classify]
+# Two-tier strategy: a cheap model answers "is there enough signal to classify
+# at all?", and only positives escalate. See ADR-0005.
+prefilter_model = "claude-haiku-4-5-20251001"
+classifier_model = "claude-sonnet-5"
+
+# Classifications below this confidence are downgraded to UNKNOWN.
+confidence_floor = 0.55
+
+# Temperature is fixed at 0 for reproducibility; exposed so the eval harness
+# can document what it ran with, not so it can be tuned upward.
+temperature = 0.0
+
+# Per-invocation hard ceiling. On exhaustion the remaining tests are emitted as
+# UNKNOWN with reason budget_exhausted -- never silently dropped.
+budget_usd = 0.50
+
+# Maximum tests classified per invocation, prioritized by flake rate x recency.
+max_tests = 25
+
+# Content-addressed cache location. Key is a hash of the assembled context.
+cache_path = ".flaketriage/cache"
+
+# Stack traces are truncated to this many characters after project-frame
+# extraction, to bound both cost and context dilution.
+trace_budget_chars = 2000
+
+[policy]
+# Quarantine is recommended only when every condition in §6.6 holds.
+quarantine_flake_rate = 0.05
+quarantine_min_observations = 10
+
+# Quarantine without expiry becomes a graveyard of permanently disabled tests.
+quarantine_ttl_days = 14
+
+# Consecutive clean executions that automatically return a test to blocking.
+dequarantine_clean_runs = 20
+
+[report]
+# Rows shown in the PR comment table before collapsing into <details>.
+# Verbose bot comments get muted; brevity is functional.
+pr_comment_max_rows = 10
