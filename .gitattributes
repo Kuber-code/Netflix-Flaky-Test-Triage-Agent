@@ -1,0 +1,6 @@
+# Normalize to LF in the repository. CI runs on Linux and the Makefile is
+# consumed by /bin/sh, so a CRLF checkout would break both.
+* text=auto eol=lf
+
+*.png binary
+*.sqlite binary
