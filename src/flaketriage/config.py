@@ -47,6 +47,28 @@ class DetectConfig(_Section):
     ewma_alpha: float = Field(default=0.3, gt=0.0, le=1.0)
     regression_pass_streak: int = Field(default=3, ge=1)
     regression_fail_streak: int = Field(default=2, ge=1)
+    main_branch: str = "main"
+
+    # Substrings that identify a platform-level failure rather than a test
+    # failure. Matching executions are excluded from flake rate entirely --
+    # numerator and denominator -- because attributing a runner preemption to a
+    # test author poisons the metric and destroys trust in the tool.
+    #
+    # Deliberately conservative: a false positive here HIDES a real flake, which
+    # is the worse error, so only unambiguously platform-level phrases belong.
+    infra_error_patterns: tuple[str, ...] = (
+        "no space left on device",
+        "error pulling image",
+        "imagepullbackoff",
+        "manifest unknown",
+        "the runner has received a shutdown signal",
+        "the operation was canceled",
+        "lost communication with the server",
+        "received sigkill",
+        "exited with code 137",
+        "spot instance interruption",
+        "worker was preempted",
+    )
 
 
 class IdentityConfig(_Section):

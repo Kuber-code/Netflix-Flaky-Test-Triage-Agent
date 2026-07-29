@@ -28,6 +28,30 @@ ewma_alpha = 0.3
 regression_pass_streak = 3
 regression_fail_streak = 2
 
+# Branch treated as the baseline for branch-independent intermittency (signal 3).
+main_branch = "main"
+
+# Substrings identifying a platform-level failure rather than a test failure.
+# Matching executions are excluded from flake rate entirely -- numerator and
+# denominator -- because attributing a runner preemption to a test author
+# poisons the metric and destroys trust in the tool.
+#
+# Deliberately conservative. A false positive here HIDES a real flake, which is
+# the worse error, so only unambiguously platform-level phrases belong.
+infra_error_patterns = [
+  "no space left on device",
+  "error pulling image",
+  "imagepullbackoff",
+  "manifest unknown",
+  "the runner has received a shutdown signal",
+  "the operation was canceled",
+  "lost communication with the server",
+  "received sigkill",
+  "exited with code 137",
+  "spot instance interruption",
+  "worker was preempted",
+]
+
 [identity]
 # Combined distance -- half the test-name distance plus half the suite-path
 # distance -- below which two identities are treated as one logical test. The

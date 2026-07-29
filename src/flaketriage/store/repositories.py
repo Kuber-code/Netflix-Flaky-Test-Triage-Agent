@@ -394,6 +394,10 @@ class RunStore:
         records.sort(key=lambda record: (record.started_at, record.execution_id), reverse=True)
         return records if limit is None else records[:limit]
 
+    def all_identity_ids(self) -> list[int]:
+        rows = self._connection.execute("SELECT id FROM test_identities ORDER BY id")
+        return [int(row["id"]) for row in rows]
+
     def identity_ids_for_run(self, run_pk: int) -> list[int]:
         rows = self._connection.execute(
             "SELECT DISTINCT identity_id FROM executions WHERE run_pk = ? ORDER BY identity_id",

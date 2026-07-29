@@ -10,6 +10,7 @@ stdout carries report data; stderr carries logs and diagnostics.
 
 from __future__ import annotations
 
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Final
@@ -20,10 +21,13 @@ from rich.table import Table
 
 from flaketriage import __version__
 from flaketriage.config import Config, load_config
+from flaketriage.detect import Detection, detect_all
 from flaketriage.ingest import expand_result_paths, parse_diff_file
 from flaketriage.ingest import ingest as run_ingest
 from flaketriage.models import RunMetadata
 from flaketriage.obs import configure_logging
+from flaketriage.report import render_json, render_markdown, render_terminal
+from flaketriage.report.window import InvalidWindowError, cutoff_iso
 from flaketriage.store import RunStore
 
 app = typer.Typer(
@@ -132,8 +136,11 @@ def ingest(
         ),
     ] = None,
     started_at: Annotated[
-        datetime | None,
-        typer.Option("--started-at", help="Run start time. Defaults to now, in UTC."),
+        str | None,
+        typer.Option(
+            "--started-at",
+            help="Run start time as ISO-8601, e.g. 2026-07-15T09:00:00+00:00. Defaults to now.",
+        ),
     ] = None,
 ) -> None:
     """Parse test results and persist them to the run store.
@@ -197,20 +204,40 @@ def ingest(
         stderr.print(f"[yellow]warning[/yellow] {warning.reason}: {warning.origin}")
 
 
-def _as_utc(value: datetime | None) -> datetime:
+def _as_utc(value: str | None) -> datetime:
+    """Parse an ISO-8601 timestamp, assuming UTC when no offset is given.
+
+    Parsed here rather than by Typer's datetime converter, which accepts a fixed
+    list of formats that excludes UTC offsets -- and an offset-bearing ISO-8601
+    string is exactly what every CI system hands you.
+    """
     if value is None:
         return datetime.now(UTC)
-    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+    try:
+        parsed = datetime.fromisoformat(value.strip())
+    except ValueError as exc:
+        stderr.print(
+            f"[red]Cannot parse --started-at[/red] {value!r}; "
+            "expected ISO-8601, e.g. 2026-07-15T09:00:00+00:00."
+        )
+        raise typer.Exit(1) from exc
+    return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed.astimezone(UTC)
 
 
 @app.command()
 def detect(
     since: Annotated[str, typer.Option("--since", help="Lookback window, e.g. 30d.")] = "30d",
     json_output: Annotated[bool, typer.Option("--json", help="Emit JSON to stdout.")] = False,
+    show_healthy: Annotated[
+        bool, typer.Option("--show-healthy", help="Include tests with no findings.")
+    ] = False,
 ) -> None:
     """Run the deterministic detector. Never calls a model."""
-    del since, json_output
-    _not_implemented("detect", "P3")
+    detections = _run_detection(since)
+    if json_output:
+        stdout.print_json(render_json(detections, llm_enabled=False))
+    else:
+        render_terminal(detections, stdout, show_healthy=show_healthy)
 
 
 @app.command()
@@ -219,16 +246,34 @@ def triage(
     no_llm: Annotated[
         bool, typer.Option("--no-llm", help="Deterministic output only; zero API calls.")
     ] = False,
+    since: Annotated[str, typer.Option("--since", help="Lookback window, e.g. 30d.")] = "30d",
     budget_usd: Annotated[
         float | None, typer.Option("--budget-usd", help="Per-invocation cost ceiling.")
     ] = None,
     max_tests: Annotated[
         int | None, typer.Option("--max-tests", help="Cap on tests classified.")
     ] = None,
+    output_format: Annotated[
+        str, typer.Option("--format", help="terminal, json, or markdown.")
+    ] = "terminal",
+    out: Annotated[
+        Path | None,
+        typer.Option("--out", help="Write to this file as UTF-8 instead of stdout."),
+    ] = None,
 ) -> None:
     """Detect flakes and, unless --no-llm is given, classify their likely cause."""
-    del sha, no_llm, budget_usd, max_tests
-    _not_implemented("triage", "P3/P4")
+    del budget_usd, max_tests  # consumed by the classifier in phase P6
+    detections = _run_detection(since, sha=sha)
+
+    if not no_llm:
+        # The classifier is not built yet. Saying so is better than silently
+        # producing deterministic-only output that looks like a full triage.
+        stderr.print(
+            "[yellow]note[/yellow] the cause classifier arrives in phase P4; "
+            "reporting deterministic results only. Pass --no-llm to silence this."
+        )
+
+    _emit(detections, output_format, llm_enabled=False, out=out)
 
 
 @app.command()
@@ -236,10 +281,94 @@ def report(
     output_format: Annotated[
         str, typer.Option("--format", help="terminal, json, or markdown.")
     ] = "terminal",
+    since: Annotated[str, typer.Option("--since", help="Lookback window, e.g. 30d.")] = "30d",
+    out: Annotated[
+        Path | None,
+        typer.Option("--out", help="Write to this file as UTF-8 instead of stdout."),
+    ] = None,
 ) -> None:
-    """Render the most recent triage result."""
-    del output_format
-    _not_implemented("report", "P3/P8")
+    """Render the current detection state in the requested format."""
+    _emit(_run_detection(since), output_format, llm_enabled=False, out=out)
+
+
+def _run_detection(since: str, *, sha: str | None = None) -> list[Detection]:
+    """Shared detection path for detect, triage and report.
+
+    One code path means the three commands cannot disagree about a verdict, which
+    they would eventually do if each assembled its own pipeline.
+    """
+    try:
+        cutoff = cutoff_iso(since)
+    except InvalidWindowError as exc:
+        stderr.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+
+    store_path = state.config.store_path()
+    if not store_path.exists():
+        stderr.print(f"[red]No run store at[/red] {store_path}. Run `flaketriage ingest` first.")
+        raise typer.Exit(1)
+
+    with RunStore.open(store_path) as store:
+        identity_ids = None
+        if sha is not None:
+            identity_ids = store.failing_identities_at_sha(sha)
+            if not identity_ids:
+                stderr.print(f"[dim]No failures recorded at {sha}.[/dim]")
+        return detect_all(
+            store, config=state.config.detect, identity_ids=identity_ids, since=cutoff
+        )
+
+
+def _emit(
+    detections: list[Detection],
+    output_format: str,
+    *,
+    llm_enabled: bool,
+    out: Path | None = None,
+) -> None:
+    """Write the report in the requested format, to ``out`` or to stdout."""
+    fmt = output_format.strip().lower()
+
+    if fmt == "terminal":
+        if out is not None:
+            stderr.print("[red]--out is only meaningful with --format json or markdown.[/red]")
+            raise typer.Exit(1)
+        render_terminal(detections, stdout)
+        return
+
+    if fmt == "json":
+        text = render_json(detections, llm_enabled=llm_enabled) + "\n"
+    elif fmt == "markdown":
+        text = render_markdown(
+            detections,
+            max_rows=state.config.report.pr_comment_max_rows,
+            llm_enabled=llm_enabled,
+        )
+    else:
+        stderr.print(
+            f"[red]Unknown format[/red] {output_format!r}; expected terminal, json or markdown."
+        )
+        raise typer.Exit(1)
+
+    if out is not None:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(text, encoding="utf-8", newline="\n")
+        stderr.print(f"[dim]wrote {len(text)} bytes to {out}[/dim]")
+        return
+
+    # Written as UTF-8 bytes rather than through the Console: machine-readable
+    # output must not be word-wrapped, style-escaped, or re-encoded into whatever
+    # code page the terminal happens to be using.
+    _write_raw(text)
+
+
+def _write_raw(text: str) -> None:
+    buffer = getattr(sys.stdout, "buffer", None)
+    if buffer is None:  # pragma: no cover - only under a captured text stream
+        sys.stdout.write(text)
+        return
+    buffer.write(text.encode("utf-8"))
+    buffer.flush()
 
 
 @app.command()
