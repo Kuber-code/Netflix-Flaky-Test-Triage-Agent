@@ -29,13 +29,17 @@ regression_pass_streak = 3
 regression_fail_streak = 2
 
 [identity]
-# Normalized edit distance below which two test names in the same file are
-# considered a rename rather than two distinct tests.
+# Combined distance -- half the test-name distance plus half the suite-path
+# distance -- below which two identities are treated as one logical test. The
+# even split lets a pure rename and a pure file move each clear the bar while
+# refusing a test that was renamed and moved at once, which is ambiguous.
 alias_max_distance = 0.25
 
-# Aliases inferred at or above this distance are marked merged_uncertain and
-# surfaced in output rather than silently merged.
-alias_certain_distance = 0.10
+# Aliases at or above this distance are marked merged_uncertain and surfaced in
+# output rather than silently merged. Set strictly on purpose: only a
+# typo-level change counts as certain, because similarity is inference and a
+# wrongly merged history is a flake rate that describes no real test.
+alias_certain_distance = 0.03
 
 [classify]
 # Two-tier strategy: a cheap model answers "is there enough signal to classify

@@ -76,15 +76,40 @@ class ExecutionRecord:
         )
 
 
+class IdentityGroup:
+    """One logical test: an identity plus everything aliased to it.
+
+    ``merged_uncertain`` is true when any edge in the group was inferred from a
+    similarity score rather than being certain. It travels with the group so that
+    a flake rate computed over merged history can be labelled as such instead of
+    being presented with false precision.
+    """
+
+    __slots__ = ("identity_ids", "merged_uncertain")
+
+    def __init__(self, identity_ids: tuple[int, ...], merged_uncertain: bool) -> None:
+        self.identity_ids = identity_ids
+        self.merged_uncertain = merged_uncertain
+
+    @property
+    def is_merged(self) -> bool:
+        return len(self.identity_ids) > 1
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return f"IdentityGroup(ids={self.identity_ids}, merged_uncertain={self.merged_uncertain})"
+
+
 class IngestSummary:
     """What one ingest invocation did. Reported to the user, not just logged."""
 
     __slots__ = (
+        "aliases_recorded",
         "cases_ingested",
         "cases_skipped_duplicate",
         "diff_files",
         "new_identities",
         "run_pk",
+        "uncertain_aliases",
         "warnings",
     )
 
@@ -96,6 +121,8 @@ class IngestSummary:
         new_identities: int,
         diff_files: int,
         warnings: tuple[ParseWarning, ...],
+        aliases_recorded: int = 0,
+        uncertain_aliases: int = 0,
     ) -> None:
         self.run_pk = run_pk
         self.cases_ingested = cases_ingested
@@ -103,6 +130,8 @@ class IngestSummary:
         self.new_identities = new_identities
         self.diff_files = diff_files
         self.warnings = warnings
+        self.aliases_recorded = aliases_recorded
+        self.uncertain_aliases = uncertain_aliases
 
 
 class RunStore:
@@ -286,6 +315,113 @@ class RunStore:
                     ],
                 )
         return len(diff.files)
+
+    def record_alias(
+        self,
+        old_identity_id: int,
+        new_identity_id: int,
+        *,
+        similarity: float,
+        certain: bool,
+        run_pk: int | None = None,
+    ) -> bool:
+        """Record that two identities are the same logical test.
+
+        Returns whether a new edge was created. An existing edge is upgraded from
+        uncertain to certain if better evidence arrives, but never downgraded:
+        once a merge has been confirmed, a later weaker observation should not
+        cast doubt on it.
+        """
+        now = _utc_now_iso()
+        with transaction(self._connection) as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO identity_aliases
+                    (old_identity_id, new_identity_id, similarity, certain,
+                     observed_run_id, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT (old_identity_id, new_identity_id) DO UPDATE
+                    SET certain = MAX(certain, excluded.certain),
+                        similarity = MAX(similarity, excluded.similarity)
+                """,
+                (old_identity_id, new_identity_id, similarity, int(certain), run_pk, now),
+            )
+            return cursor.rowcount == 1
+
+    def identity_group(self, identity_id: int) -> IdentityGroup:
+        """Transitive closure of alias edges touching ``identity_id``.
+
+        Traversal runs in Python over a table that holds one row per observed
+        rename -- orders of magnitude smaller than ``executions`` -- which keeps
+        the query literal and avoids a recursive CTE for no measurable gain.
+        """
+        seen = {identity_id}
+        frontier = [identity_id]
+        uncertain = False
+
+        while frontier:
+            current = frontier.pop()
+            rows = self._connection.execute(
+                """
+                SELECT old_identity_id AS old_id, new_identity_id AS new_id, certain
+                  FROM identity_aliases
+                 WHERE old_identity_id = ? OR new_identity_id = ?
+                """,
+                (current, current),
+            ).fetchall()
+            for row in rows:
+                if not row["certain"]:
+                    uncertain = True
+                for neighbour in (int(row["old_id"]), int(row["new_id"])):
+                    if neighbour not in seen:
+                        seen.add(neighbour)
+                        frontier.append(neighbour)
+
+        return IdentityGroup(identity_ids=tuple(sorted(seen)), merged_uncertain=uncertain)
+
+    def executions_for_group(
+        self, identity_id: int, *, limit: int | None = None
+    ) -> list[ExecutionRecord]:
+        """Merged history for one logical test, newest first.
+
+        This is the read the detector uses. Going through the group rather than
+        the raw identity is what makes a rename stop resetting a flake rate.
+        """
+        group = self.identity_group(identity_id)
+        records: list[ExecutionRecord] = []
+        for member in group.identity_ids:
+            records.extend(self.executions_for_identity(member, limit=limit))
+        records.sort(key=lambda record: (record.started_at, record.execution_id), reverse=True)
+        return records if limit is None else records[:limit]
+
+    def identity_ids_for_run(self, run_pk: int) -> list[int]:
+        rows = self._connection.execute(
+            "SELECT DISTINCT identity_id FROM executions WHERE run_pk = ? ORDER BY identity_id",
+            (run_pk,),
+        )
+        return [int(row["identity_id"]) for row in rows]
+
+    def identities_before_run(self, run_pk: int) -> list[tuple[int, TestIdentity]]:
+        """Identities observed strictly before ``run_pk``, newest observation first.
+
+        "Before" is by run start time rather than by insertion order, because
+        sharded pipelines ingest out of order and a shard that reports late must
+        not look like a later run.
+        """
+        rows = self._connection.execute(
+            """
+            SELECT i.id, i.fingerprint, i.suite_path, i.test_name, i.parameters, i.file_path,
+                   MAX(r.started_at) AS last_started
+              FROM executions e
+              JOIN runs r ON r.id = e.run_pk
+              JOIN test_identities i ON i.id = e.identity_id
+             WHERE r.started_at < (SELECT started_at FROM runs WHERE id = ?)
+             GROUP BY i.id
+             ORDER BY last_started DESC, i.id
+            """,
+            (run_pk,),
+        )
+        return [(int(row["id"]), _identity_from_row(row)) for row in rows]
 
     def record_warnings(self, run_pk: int | None, warnings: Sequence[ParseWarning]) -> int:
         now = _utc_now_iso()

@@ -51,7 +51,9 @@ class DetectConfig(_Section):
 
 class IdentityConfig(_Section):
     alias_max_distance: float = Field(default=0.25, ge=0.0, le=1.0)
-    alias_certain_distance: float = Field(default=0.10, ge=0.0, le=1.0)
+    # Deliberately strict: "certain" means typo-level, nothing more. Everything
+    # above it is inference and is surfaced as merged_uncertain.
+    alias_certain_distance: float = Field(default=0.03, ge=0.0, le=1.0)
 
 
 class ClassifyConfig(_Section):

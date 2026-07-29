@@ -168,6 +168,7 @@ def ingest(
             paths,
             diff=diff_result,
             extra_warnings=diff_result.warnings if diff_result is not None else (),
+            identity_config=state.config.identity,
         )
 
     table = Table(title=f"Ingested {sha[:12]} (run {run_id}, attempt {attempt})", box=None)
@@ -177,9 +178,18 @@ def ingest(
     table.add_row("executions recorded", str(summary.cases_ingested))
     table.add_row("duplicates skipped", str(summary.cases_skipped_duplicate))
     table.add_row("new test identities", str(summary.new_identities))
+    table.add_row("renames merged", str(summary.aliases_recorded))
     table.add_row("diff files", str(summary.diff_files))
     table.add_row("parse warnings", str(len(summary.warnings)))
     stdout.print(table)
+
+    # An inferred merge is reported, never applied silently: a wrongly merged
+    # history produces a flake rate that describes no real test.
+    if summary.uncertain_aliases:
+        stderr.print(
+            f"[yellow]merged_uncertain[/yellow] {summary.uncertain_aliases} rename(s) were "
+            "inferred from name similarity rather than observed."
+        )
 
     # Warnings are surfaced, not buried: a half-truncated result file means the
     # run's data is incomplete and any flake rate computed from it is suspect.

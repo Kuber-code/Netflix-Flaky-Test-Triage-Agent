@@ -28,6 +28,9 @@ def test_tracked_config_file_loads(repo_root: Path) -> None:
     assert config.root == repo_root
     assert config.policy.quarantine_ttl_days == 14
     assert config.classify.budget_usd == pytest.approx(0.50)
+    # The committed file and the model defaults must not drift apart.
+    assert config.identity == Config().identity
+    assert config.detect == Config().detect
 
 
 def test_unknown_key_is_rejected(tmp_path: Path) -> None:

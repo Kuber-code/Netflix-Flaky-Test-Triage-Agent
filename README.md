@@ -87,13 +87,37 @@ each is exercised separately:
 - A `DOCTYPE` is refused outright. It has no legitimate purpose in a CI artifact
   and is the vector for entity-expansion attacks.
 
+### Test identity is harder than it looks
+
+Every number this tool produces is computed over a test's history, so history is
+only as good as the key it hangs on — and the obvious key breaks in four ordinary
+situations, each of which silently resets history to zero: parameterized tests,
+reporters disagreeing on how to name the same test, renames, and file moves. The
+damaging property is shared: history resets exactly when an engineer is touching
+a flaky test, which is when its history is most needed.
+
+The key is a normalized, hashed `(suite_path, test_name, parameters)` triple.
+Renames and moves are reconciled through an alias table: an identity that
+produces no execution in a run, paired with a previously unseen identity in the
+same run, at a combined name-and-path distance within threshold, and only when
+the pairing is unambiguous. Two disappeared tests competing for one appeared test
+merge nothing.
+
+Only typo-level distances are recorded as certain. Everything else is stored as
+`merged_uncertain` and surfaced in output, because a wrongly merged history
+produces a flake rate that describes no real test and the reader would otherwise
+have no way to tell. A test renamed *and* moved in one commit loses its history
+on purpose — both signals changed, so there is no evidence distinguishing it from
+an unrelated deletion plus addition. See
+[ADR-0002](docs/adr/0002-test-identity-strategy.md).
+
 ## Build status
 
 | Phase | Deliverable | Status |
 |---|---|---|
 | P0 | Scaffolding: uv project, ruff/mypy/pytest, Makefile, CI, CLI surface | done |
 | P1 | Ingest: JUnit XML, diff parser, SQLite schema, `ingest` | done |
-| P2 | Identity: alias resolution across renames | pending |
+| P2 | Identity: alias resolution across renames and moves | done |
 | P3 | Detector: four signals, regression path, confidence levels | pending |
 | P4 | Classifier: schema validation, repair retry, abstention, cache | pending |
 | P5 | Evaluation harness, labeled corpus, baseline, results table | pending |

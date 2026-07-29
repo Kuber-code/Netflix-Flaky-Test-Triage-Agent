@@ -12,7 +12,9 @@ from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import Final
 
+from flaketriage.config import IdentityConfig
 from flaketriage.identity.fingerprint import identity_for
+from flaketriage.identity.reconcile import reconcile_renames
 from flaketriage.ingest.junit import parse_files
 from flaketriage.models import DiffSummary, ParseWarning, RunMetadata
 from flaketriage.obs import get_logger
@@ -61,6 +63,7 @@ def ingest(
     result_paths: Sequence[Path],
     diff: DiffSummary | None = None,
     extra_warnings: Sequence[ParseWarning] = (),
+    identity_config: IdentityConfig | None = None,
 ) -> IngestSummary:
     """Parse result files and persist them against ``metadata``."""
     parsed = parse_files(list(result_paths))
@@ -76,6 +79,10 @@ def ingest(
         rows.append((identity_id, case))
 
     inserted, skipped = store.record_executions(run_pk, rows)
+
+    # Rename reconciliation runs after executions are recorded, because
+    # "disappeared" and "appeared" are both defined by what this run executed.
+    reconciled = reconcile_renames(store, run_pk, identity_config)
 
     diff_files = store.record_diff(run_pk, diff) if diff is not None else 0
 
@@ -94,6 +101,8 @@ def ingest(
         cases_ingested=inserted,
         cases_skipped_duplicate=skipped,
         new_identities=new_identities,
+        aliases_recorded=reconciled.recorded,
+        uncertain_aliases=reconciled.uncertain,
         diff_files=diff_files,
         warnings=len(warnings),
     )
@@ -105,4 +114,6 @@ def ingest(
         new_identities=new_identities,
         diff_files=diff_files,
         warnings=warnings,
+        aliases_recorded=reconciled.recorded,
+        uncertain_aliases=reconciled.uncertain,
     )
