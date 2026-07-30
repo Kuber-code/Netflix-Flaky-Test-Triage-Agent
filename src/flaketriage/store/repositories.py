@@ -12,6 +12,7 @@ because observation counts feed flake rate.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from collections.abc import Sequence
 from datetime import UTC, datetime
@@ -20,7 +21,10 @@ from types import TracebackType
 from typing import Self
 
 from flaketriage.models import (
+    CauseCode,
+    Classification,
     DiffSummary,
+    DowngradeReason,
     Outcome,
     ParseWarning,
     RunMetadata,
@@ -28,6 +32,13 @@ from flaketriage.models import (
     TestIdentity,
 )
 from flaketriage.obs import get_logger
+from flaketriage.obs.metrics import (
+    CallMetric,
+    MetricsSummary,
+    record_calls,
+    record_classifications,
+    summarize,
+)
 from flaketriage.store.db import connect, transaction
 
 log = get_logger(__name__)
@@ -426,6 +437,62 @@ class RunStore:
             (run_pk,),
         )
         return [(int(row["id"]), _identity_from_row(row)) for row in rows]
+
+    def record_metrics(
+        self,
+        calls: Sequence[CallMetric],
+        classifications: dict[int, Classification],
+        *,
+        run_pk: int | None = None,
+        commit_sha: str = "",
+        cache_hits: frozenset[int] = frozenset(),
+    ) -> tuple[int, int]:
+        """Persist one triage invocation's model calls and classifications.
+
+        Written in one transaction so that a crash cannot leave classifications
+        recorded with no cost attached to them, which would understate spend.
+        """
+        with transaction(self._connection) as connection:
+            recorded_calls = record_calls(connection, calls, run_pk=run_pk)
+            recorded_classifications = record_classifications(
+                connection,
+                classifications,
+                run_pk=run_pk,
+                commit_sha=commit_sha,
+                cache_hits=cache_hits,
+            )
+        return recorded_calls, recorded_classifications
+
+    def metrics_summary(self, *, since: str | None = None) -> MetricsSummary:
+        return summarize(self._connection, since=since)
+
+    def latest_classification(self, identity_id: int) -> Classification | None:
+        """Most recent stored classification for a test, for the policy engine."""
+        row = self._connection.execute(
+            """
+            SELECT cause, confidence, abstained, downgrade_reason, reasoning,
+                   evidence, suggested_action, model, prompt_version
+              FROM classifications
+             WHERE identity_id = ?
+             ORDER BY id DESC
+             LIMIT 1
+            """,
+            (identity_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        evidence = tuple(json.loads(row["evidence"])) if row["evidence"] else ()
+        return Classification(
+            cause=CauseCode(row["cause"]),
+            confidence=float(row["confidence"]),
+            reasoning=row["reasoning"] or "",
+            evidence=evidence,
+            suggested_action=row["suggested_action"] or "",
+            abstained=bool(row["abstained"]),
+            downgrade_reason=DowngradeReason(row["downgrade_reason"]),
+            model=row["model"],
+            prompt_version=row["prompt_version"],
+        )
 
     def record_warnings(self, run_pk: int | None, warnings: Sequence[ParseWarning]) -> int:
         now = _utc_now_iso()

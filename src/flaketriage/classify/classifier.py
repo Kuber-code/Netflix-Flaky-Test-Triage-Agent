@@ -49,6 +49,7 @@ from flaketriage.config import ClassifyConfig
 from flaketriage.detect.models import Detection
 from flaketriage.models import DiffSummary
 from flaketriage.obs import get_logger
+from flaketriage.obs.metrics import CallMetric
 
 log = get_logger(__name__)
 
@@ -97,7 +98,8 @@ class CallRecord:
 class ClassifyStats:
     """Run-level accounting, reported rather than merely collected."""
 
-    def __init__(self) -> None:
+    def __init__(self, prompt_version: str = "") -> None:
+        self.prompt_version = prompt_version
         self.calls: list[CallRecord] = []
         self.cache_hits = 0
         self.cache_misses = 0
@@ -119,6 +121,29 @@ class ClassifyStats:
     def cache_hit_rate(self) -> float:
         lookups = self.cache_hits + self.cache_misses
         return self.cache_hits / lookups if lookups else 0.0
+
+    def as_call_metrics(self) -> list[CallMetric]:
+        """Flatten the call log for persistence by the store.
+
+        The classifier does not write to the database itself: it has no run
+        context and no business owning a connection. It reports, and the caller
+        persists.
+        """
+        return [
+            CallMetric(
+                kind=record.kind,
+                model=record.model,
+                prompt_version=self.prompt_version,
+                input_tokens=record.input_tokens,
+                output_tokens=record.output_tokens,
+                cost_usd=record.cost_usd,
+                latency_ms=record.latency_ms,
+                cache_hit=record.cache_hit,
+                schema_valid=record.schema_valid,
+                error=record.error,
+            )
+            for record in self.calls
+        ]
 
     def latencies_ms(self, kind: str | None = None) -> list[float]:
         return [record.latency_ms for record in self.calls if kind is None or record.kind == kind]
@@ -142,7 +167,9 @@ class Classifier:
         self._costs = cost_table or CostTable({})
         self._budget_usd = config.budget_usd if budget_usd is None else budget_usd
         self._prompt_version = prompt_version_hash()
-        self.stats = ClassifyStats()
+        self.stats = ClassifyStats(self._prompt_version)
+        # Identity ids answered from the cache, for the metrics table.
+        self.cache_hit_ids: set[int] = set()
 
     @property
     def prompt_version(self) -> str:
@@ -254,6 +281,7 @@ class Classifier:
             cached = self._cache.get(key)
             if cached is not None:
                 self.stats.cache_hits += 1
+                self.cache_hit_ids.add(detection.identity_id)
                 return cached
             self.stats.cache_misses += 1
 

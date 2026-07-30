@@ -220,7 +220,7 @@ JSON output rather than being averaged into one indistinguishable number.
 | P3 | Detector: four signals, regression path, confidence, `detect`/`report` | done |
 | P4 | Classifier: schema validation, repair retry, abstention, cache, prefilter | done |
 | P5 | Evaluation harness, labeled corpus, baseline, results table | done |
-| P6 | Cost controls: prefilter, budget cap, cost accounting | done in P4 |
+| P6 | Cost controls and observability: `stats`, Prometheus output | done |
 | P7 | Policy engine: quarantine rules, TTL, ownership, de-quarantine | pending |
 | P8 | Interfaces: PR comment renderer, `action.yml` | pending |
 | P9 | Docs: README as design doc, ARCHITECTURE, ADRs | pending |
@@ -301,6 +301,20 @@ detection should stay deterministic, which is exactly where it already lives —
 detector excludes platform failures from the flake rate by pattern before any model
 runs. Four classes are matched by a regex, so on those the model is not earning its
 cost.
+
+### Observability
+
+`flaketriage stats` aggregates over persisted model calls and classifications:
+cost per classification, cache hit rate, abstention rate broken down **by reason**,
+classifications by cause, and P50/P95 classify latency. `--metrics-out` writes
+Prometheus text format so the tool could be scraped rather than only read.
+
+Two decisions there are worth naming. Abstentions are stored rather than skipped —
+an abstention rate cannot be computed from a table that only records the times the
+classifier had something to say. And the cache hit rate divides by classification
+*attempts*, not by API calls: dividing by calls would make the rate rise as the
+cache got worse, because every miss adds to the denominator and every hit adds
+nothing.
 
 ### Measured cost and latency
 

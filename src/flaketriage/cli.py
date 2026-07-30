@@ -10,6 +10,7 @@ stdout carries report data; stderr carries logs and diagnostics.
 
 from __future__ import annotations
 
+import json
 import subprocess  # fixed argv, shell=False
 import sys
 from datetime import UTC, datetime
@@ -27,7 +28,8 @@ from flaketriage.detect import Detection, detect_all
 from flaketriage.ingest import expand_result_paths, parse_diff_file
 from flaketriage.ingest import ingest as run_ingest
 from flaketriage.models import Classification, RunMetadata
-from flaketriage.obs import configure_logging
+from flaketriage.obs import as_dict as metrics_as_dict
+from flaketriage.obs import configure_logging, render_prometheus
 from flaketriage.report import render_json, render_markdown, render_terminal
 from flaketriage.report.window import InvalidWindowError, cutoff_iso
 from flaketriage.store import RunStore
@@ -291,6 +293,16 @@ def triage(
         f"${stats.total_cost_usd:.4f}[/dim]"
     )
 
+    # Persisted so that `stats` can answer "what does this cost us per week", which
+    # is the question that decides whether the tool stays switched on.
+    with RunStore.open(state.config.store_path()) as store:
+        store.record_metrics(
+            stats.as_call_metrics(),
+            classifications,
+            commit_sha=sha or "",
+            cache_hits=frozenset(classifier.cache_hit_ids),
+        )
+
     _emit(
         detections,
         output_format,
@@ -447,9 +459,87 @@ def evaluate(
 
 
 @app.command()
-def stats() -> None:
+def stats(
+    since: Annotated[
+        str, typer.Option("--since", help="Window to aggregate over, e.g. 30d.")
+    ] = "30d",
+    json_output: Annotated[bool, typer.Option("--json", help="Emit JSON to stdout.")] = False,
+    metrics_out: Annotated[
+        Path | None,
+        typer.Option(
+            "--metrics-out",
+            help="Write Prometheus text-format metrics to this file so the tool could "
+            "be scraped in a real deployment.",
+        ),
+    ] = None,
+) -> None:
     """Show run metrics: causes, abstention rate, cost, cache hit rate, latency."""
-    _not_implemented("stats", "P6")
+    try:
+        cutoff = cutoff_iso(since)
+    except InvalidWindowError as exc:
+        stderr.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+
+    store_path = state.config.store_path()
+    if not store_path.exists():
+        stderr.print(f"[red]No run store at[/red] {store_path}. Run `flaketriage ingest` first.")
+        raise typer.Exit(1)
+
+    with RunStore.open(store_path) as store:
+        summary = store.metrics_summary(since=cutoff)
+
+    if metrics_out is not None:
+        metrics_out.parent.mkdir(parents=True, exist_ok=True)
+        metrics_out.write_text(render_prometheus(summary), encoding="utf-8", newline=chr(10))
+        stderr.print(f"[dim]wrote Prometheus metrics to {metrics_out}[/dim]")
+
+    if json_output:
+        _write_raw(json.dumps(metrics_as_dict(summary), indent=2) + chr(10))
+        return
+
+    table = Table(title=f"flaketriage metrics, last {since}", box=None)
+    table.add_column("metric")
+    table.add_column("value", justify="right")
+    table.add_row("runs ingested", str(summary.runs))
+    table.add_row("classifications", str(summary.classifications))
+    table.add_row("abstentions", f"{summary.abstentions} ({summary.abstention_rate:.1%})")
+    table.add_row("cache hit rate", f"{summary.cache_hit_rate:.1%}")
+    table.add_row("API calls", str(summary.api_calls))
+    table.add_row("failed API calls", str(summary.errors))
+    table.add_row("total cost", f"${summary.total_cost_usd:.4f}")
+    table.add_row("cost per classification", f"${summary.cost_per_classification_usd:.4f}")
+    table.add_row(
+        "tokens in / out", f"{summary.total_input_tokens} / {summary.total_output_tokens}"
+    )
+    table.add_row("classify latency P50", f"{summary.latency_p50_ms:.0f} ms")
+    table.add_row("classify latency P95", f"{summary.latency_p95_ms:.0f} ms")
+    stdout.print(table)
+
+    if summary.by_cause:
+        causes = Table(title="classifications by cause", box=None)
+        causes.add_column("cause")
+        causes.add_column("n", justify="right")
+        for cause, count in sorted(summary.by_cause.items(), key=lambda pair: -pair[1]):
+            causes.add_row(cause, str(count))
+        stdout.print()
+        stdout.print(causes)
+
+    # Abstentions are broken down by reason, so a high rate can be diagnosed
+    # rather than merely observed.
+    if summary.by_downgrade_reason:
+        reasons = Table(title="abstentions by reason", box=None)
+        reasons.add_column("reason")
+        reasons.add_column("n", justify="right")
+        for reason, count in sorted(summary.by_downgrade_reason.items(), key=lambda p: -p[1]):
+            reasons.add_row(reason, str(count))
+        stdout.print()
+        stdout.print(reasons)
+
+    if not summary.classifications and not summary.api_calls:
+        stderr.print(
+            "[dim]No model activity recorded in this window. "
+            "Run `flaketriage triage` with an API key to populate it.[/dim]"
+        )
 
 
 if __name__ == "__main__":  # pragma: no cover

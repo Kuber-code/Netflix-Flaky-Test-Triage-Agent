@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from typing import Final
 
-SCHEMA_VERSION: Final = 1
+SCHEMA_VERSION: Final = 2
 
 _MIGRATION_1: Final = """
 CREATE TABLE runs (
@@ -126,5 +126,55 @@ CREATE TABLE parse_warnings (
 CREATE INDEX idx_parse_warnings_run ON parse_warnings (run_pk);
 """
 
+
+# Phase P6: observability. Every model call and every classification is persisted,
+# not merely logged. A log line answers "what happened just now"; these tables
+# answer "what does this tool cost us per week, and how often does it abstain" --
+# which is the question that decides whether it stays switched on.
+_MIGRATION_2: Final = """
+CREATE TABLE llm_calls (
+    id             INTEGER PRIMARY KEY,
+    run_pk         INTEGER REFERENCES runs (id) ON DELETE SET NULL,
+    kind           TEXT    NOT NULL CHECK (kind IN ('prefilter', 'classify', 'repair')),
+    model          TEXT    NOT NULL,
+    prompt_version TEXT    NOT NULL DEFAULT '',
+    input_tokens   INTEGER NOT NULL DEFAULT 0,
+    output_tokens  INTEGER NOT NULL DEFAULT 0,
+    cost_usd       REAL    NOT NULL DEFAULT 0,
+    latency_ms     REAL    NOT NULL DEFAULT 0,
+    cache_hit      INTEGER NOT NULL DEFAULT 0,
+    schema_valid   INTEGER NOT NULL DEFAULT 1,
+    error          TEXT,
+    created_at     TEXT    NOT NULL
+);
+
+CREATE INDEX idx_llm_calls_created ON llm_calls (created_at);
+CREATE INDEX idx_llm_calls_kind ON llm_calls (kind, created_at);
+
+-- One row per classification produced, including abstentions. Abstentions are
+-- stored rather than skipped: the abstention rate is a headline metric, and it
+-- cannot be computed from a table that only records successes.
+CREATE TABLE classifications (
+    id               INTEGER PRIMARY KEY,
+    identity_id      INTEGER NOT NULL REFERENCES test_identities (id),
+    run_pk           INTEGER REFERENCES runs (id) ON DELETE SET NULL,
+    commit_sha       TEXT    NOT NULL DEFAULT '',
+    cause            TEXT    NOT NULL,
+    confidence       REAL    NOT NULL DEFAULT 0,
+    abstained        INTEGER NOT NULL DEFAULT 1,
+    downgrade_reason TEXT    NOT NULL DEFAULT 'none',
+    reasoning        TEXT,
+    evidence         TEXT,
+    suggested_action TEXT,
+    model            TEXT    NOT NULL DEFAULT '',
+    prompt_version   TEXT    NOT NULL DEFAULT '',
+    cache_hit        INTEGER NOT NULL DEFAULT 0,
+    created_at       TEXT    NOT NULL
+);
+
+CREATE INDEX idx_classifications_identity ON classifications (identity_id, id DESC);
+CREATE INDEX idx_classifications_created ON classifications (created_at);
+"""
+
 # Forward-only. Index i applies version i+1; never edit a shipped entry.
-MIGRATIONS: Final[tuple[str, ...]] = (_MIGRATION_1,)
+MIGRATIONS: Final[tuple[str, ...]] = (_MIGRATION_1, _MIGRATION_2)

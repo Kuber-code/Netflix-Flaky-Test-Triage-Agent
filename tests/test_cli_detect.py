@@ -249,3 +249,46 @@ def test_out_is_rejected_for_terminal_format(workspace: Path) -> None:
     )
     assert code == 1
     assert "only meaningful with" in output
+
+
+def test_stats_without_a_store_fails_with_a_useful_message(workspace: Path) -> None:
+    code, output = invoke(workspace, "stats")
+    assert code == 1
+    assert "No run store" in output
+
+
+def test_stats_reports_zeros_before_any_classification(workspace: Path) -> None:
+    """An empty metrics table is reported, not treated as an error."""
+    seed_flaky(workspace)
+    code, output = invoke(workspace, "stats")
+    assert code == 0, output
+    assert "runs ingested" in output
+    assert "No model activity recorded" in output
+
+
+def test_stats_json_is_machine_readable(workspace: Path) -> None:
+    seed_flaky(workspace)
+    code, output = invoke(workspace, "stats", "--json")
+    assert code == 0, output
+    payload = json.loads(output)
+    assert payload["classifications"] == 0
+    assert payload["by_cause"] == {}
+
+
+def test_stats_writes_prometheus_metrics(workspace: Path) -> None:
+    """Included so the tool could be scraped, not only read by a human."""
+    seed_flaky(workspace)
+    target = workspace / "metrics" / "flaketriage.prom"
+    code, output = invoke(workspace, "stats", "--metrics-out", str(target))
+    assert code == 0, output
+
+    text = target.read_text(encoding="utf-8")
+    assert "# TYPE flaketriage_runs_total counter" in text
+    assert text.endswith("\n")
+
+
+def test_stats_rejects_an_unparseable_window(workspace: Path) -> None:
+    seed_flaky(workspace)
+    code, output = invoke(workspace, "stats", "--since", "yesterday-ish")
+    assert code == 1
+    assert "cannot parse" in output
