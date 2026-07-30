@@ -30,6 +30,15 @@ from flaketriage.ingest import ingest as run_ingest
 from flaketriage.models import Classification, RunMetadata
 from flaketriage.obs import as_dict as metrics_as_dict
 from flaketriage.obs import configure_logging, render_prometheus
+from flaketriage.policy import (
+    CodeOwners,
+    QuarantineRecommendation,
+    QuarantineRecord,
+    RefusalReason,
+    consecutive_clean_runs,
+    should_release,
+)
+from flaketriage.policy import evaluate as evaluate_quarantine
 from flaketriage.report import render_json, render_markdown, render_terminal
 from flaketriage.report.window import InvalidWindowError, cutoff_iso
 from flaketriage.store import RunStore
@@ -414,15 +423,201 @@ def _write_raw(text: str) -> None:
 @app.command()
 def policy(
     show_quarantine: Annotated[
-        bool, typer.Option("--show-quarantine", help="List quarantined tests.")
+        bool, typer.Option("--show-quarantine", help="List open quarantines.")
     ] = False,
     expiring: Annotated[
         bool, typer.Option("--expiring", help="Only show quarantines nearing TTL expiry.")
     ] = False,
+    since: Annotated[str, typer.Option("--since", help="Lookback window, e.g. 30d.")] = "30d",
+    apply_changes: Annotated[
+        bool,
+        typer.Option(
+            "--apply",
+            help="Record new recommendations and release tests that earned it. "
+            "Without this the command only reports.",
+        ),
+    ] = False,
+    json_output: Annotated[bool, typer.Option("--json", help="Emit JSON to stdout.")] = False,
 ) -> None:
-    """Show deterministic quarantine decisions."""
-    del show_quarantine, expiring
-    _not_implemented("policy", "P7")
+    """Show deterministic quarantine decisions.
+
+    Read-only by default. ``--apply`` writes recommendations and releases -- and
+    even then it changes only this tool's own records: nothing here disables a
+    test or edits CI configuration. See ADR-0004.
+    """
+    store_path = state.config.store_path()
+    if not store_path.exists():
+        stderr.print(f"[red]No run store at[/red] {store_path}. Run `flaketriage ingest` first.")
+        raise typer.Exit(1)
+
+    detections = _run_detection(since)
+
+    with RunStore.open(store_path) as store:
+        # TTL is applied on read: there is no daemon, so a TTL that only advanced
+        # while something was running would never advance at all.
+        expired = store.expire_overdue_quarantines() if apply_changes else []
+        open_ids = store.open_quarantine_ids()
+        codeowners = CodeOwners.load(state.config.root)
+
+        recommendations = [
+            evaluate_quarantine(
+                detection,
+                classification=store.latest_classification(detection.identity_id),
+                already_quarantined=detection.identity_id in open_ids,
+                config=state.config.policy,
+                codeowners=codeowners,
+                repo_root=state.config.root,
+            )
+            for detection in detections
+        ]
+
+        released: list[str] = []
+        if apply_changes:
+            store.record_quarantines([r for r in recommendations if r.recommended])
+            for record in store.quarantines():
+                clean = consecutive_clean_runs(store.recent_outcomes(record.identity_id))
+                if should_release(clean, state.config.policy):
+                    store.release_quarantine(record.record_id, clean_runs=clean)
+                    released.append(record.test)
+
+        records = store.quarantines()
+
+    if expiring:
+        records = [record for record in records if record.expiring()]
+
+    if json_output:
+        payload = {
+            "recommendations": [_recommendation_dict(r) for r in recommendations if r.recommended],
+            "refusals": [_recommendation_dict(r) for r in recommendations if not r.recommended],
+            "open_quarantines": [_record_dict(record) for record in records],
+            "expired": [record.test for record in expired],
+            "released": released,
+            "applied": apply_changes,
+        }
+        _write_raw(json.dumps(payload, indent=2) + chr(10))
+        return
+
+    _render_policy(recommendations, records, expired, released, apply_changes, show_quarantine)
+
+
+def _render_policy(
+    recommendations: list[QuarantineRecommendation],
+    records: list[QuarantineRecord],
+    expired: list[QuarantineRecord],
+    released: list[str],
+    applied: bool,
+    show_quarantine: bool,
+) -> None:
+    proposed = [r for r in recommendations if r.recommended]
+
+    if not show_quarantine:
+        if proposed:
+            table = Table(title="Quarantine recommendations", box=None)
+            table.add_column("test", overflow="fold")
+            table.add_column("rate", justify="right")
+            table.add_column("obs", justify="right")
+            table.add_column("owner")
+            table.add_column("expires")
+            for item in proposed:
+                owner = item.owner or "[red]unresolved[/red]"
+                if item.owner_is_a_guess:
+                    # A guess must not inherit the authority of a declaration.
+                    owner += " [dim](last committer)[/dim]"
+                table.add_row(
+                    item.test,
+                    f"{item.flake_rate:.0%}",
+                    str(item.observations),
+                    owner,
+                    item.expires_at[:10],
+                )
+            stdout.print(table)
+        else:
+            stdout.print("[green]No new quarantine recommendations.[/green]")
+
+        # Refusals for tests that are otherwise flaky are worth showing: they are
+        # the cases where somebody would otherwise ask "why not this one?".
+        notable = [
+            item
+            for item in recommendations
+            if not item.recommended
+            and item.refusal not in {RefusalReason.NOT_FLAKY, RefusalReason.VERDICT_INELIGIBLE}
+        ]
+        if notable:
+            stdout.print()
+            stdout.print("[dim]Not recommended:[/dim]")
+            for item in notable:
+                stdout.print(f"  [dim]{item.test}: {item.refusal.value}[/dim]")
+
+    if show_quarantine or records:
+        stdout.print()
+        if not records:
+            stdout.print("[green]No open quarantines.[/green]")
+        else:
+            table = Table(title="Open quarantines", box=None)
+            table.add_column("test", overflow="fold")
+            table.add_column("state")
+            table.add_column("cause")
+            table.add_column("owner")
+            table.add_column("expires")
+            for record in records:
+                expiry = record.expires_at[:10]
+                if record.expiring():
+                    expiry = f"[yellow]{expiry}[/yellow]"
+                table.add_row(
+                    record.test,
+                    record.state.value,
+                    record.cause.value,
+                    record.owner or "unresolved",
+                    expiry,
+                )
+            stdout.print(table)
+
+    if expired:
+        stderr.print(
+            f"[yellow]{len(expired)} quarantine(s) expired[/yellow] with the test still "
+            "unstable; they need a decision rather than another TTL."
+        )
+    if released:
+        stderr.print(
+            f"[green]{len(released)} test(s) returned to blocking[/green] after enough "
+            "clean executions."
+        )
+    if not applied:
+        stderr.print("[dim]Read-only; pass --apply to record these decisions.[/dim]")
+
+
+def _recommendation_dict(item: QuarantineRecommendation) -> dict[str, object]:
+    return {
+        "test": item.test,
+        "identity_id": item.identity_id,
+        "recommended": item.recommended,
+        "refusal": item.refusal.value,
+        "flake_rate": round(item.flake_rate, 4),
+        "observations": item.observations,
+        "cause": item.cause.value,
+        "verdict": item.verdict.value,
+        "owner": item.owner,
+        "owner_source": item.owner_source.value,
+        "ttl_days": item.ttl_days,
+        "expires_at": item.expires_at,
+        "clean_runs_required": item.clean_runs_required,
+        "merged_uncertain": item.merged_uncertain,
+    }
+
+
+def _record_dict(record: QuarantineRecord) -> dict[str, object]:
+    return {
+        "test": record.test,
+        "identity_id": record.identity_id,
+        "state": record.state.value,
+        "cause": record.cause.value,
+        "owner": record.owner,
+        "owner_source": record.owner_source.value,
+        "expires_at": record.expires_at,
+        "expiring": record.expiring(),
+        "clean_runs_required": record.clean_runs_required,
+        "flake_rate": round(record.flake_rate, 4),
+    }
 
 
 # Registered as `eval` per the spec; the Python name avoids shadowing the builtin.

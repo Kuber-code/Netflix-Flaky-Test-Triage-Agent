@@ -14,7 +14,9 @@ EXPECTED_COMMANDS = frozenset({"ingest", "detect", "triage", "report", "policy",
 
 # Commands whose behaviour is not built yet. They must fail explicitly rather
 # than exit 0 and look like an empty result. Shrinks as phases land.
-UNIMPLEMENTED_COMMANDS = frozenset({"policy"})
+# Every specified command is now implemented. Kept as an explicit empty set
+# rather than deleted, so that adding a stub in future is a visible change.
+UNIMPLEMENTED_COMMANDS: frozenset[str] = frozenset()
 
 
 def test_version() -> None:
@@ -38,12 +40,19 @@ def test_bare_invocation_shows_help_and_does_not_crash() -> None:
     assert not isinstance(result.exception, Exception)
 
 
-@pytest.mark.parametrize("command", sorted(UNIMPLEMENTED_COMMANDS))
-def test_unimplemented_commands_fail_explicitly(command: str) -> None:
-    """An unimplemented command must not exit 0 and look like an empty result."""
-    result = runner.invoke(app, [command])
-    assert result.exit_code == 2, result.output
-    assert "not implemented" in result.output
+def test_no_command_is_a_stub() -> None:
+    """Every command in the specified surface is implemented.
+
+    Asserted rather than deleted: if a stub is added later, listing it in
+    UNIMPLEMENTED_COMMANDS makes that a visible, reviewed change instead of a
+    command that quietly exits 2.
+    """
+    assert UNIMPLEMENTED_COMMANDS == frozenset()
+
+    for command in sorted(UNIMPLEMENTED_COMMANDS):
+        result = runner.invoke(app, [command])
+        assert result.exit_code == 2, result.output
+        assert "not implemented" in result.output
 
 
 @pytest.mark.parametrize("command", sorted(EXPECTED_COMMANDS))

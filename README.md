@@ -221,7 +221,7 @@ JSON output rather than being averaged into one indistinguishable number.
 | P4 | Classifier: schema validation, repair retry, abstention, cache, prefilter | done |
 | P5 | Evaluation harness, labeled corpus, baseline, results table | done |
 | P6 | Cost controls and observability: `stats`, Prometheus output | done |
-| P7 | Policy engine: quarantine rules, TTL, ownership, de-quarantine | pending |
+| P7 | Policy engine: quarantine rules, TTL, ownership, de-quarantine | done |
 | P8 | Interfaces: PR comment renderer, `action.yml` | pending |
 | P9 | Docs: README as design doc, ARCHITECTURE, ADRs | pending |
 
@@ -301,6 +301,39 @@ detection should stay deterministic, which is exactly where it already lives —
 detector excludes platform failures from the flake rate by pattern before any model
 runs. Four classes are matched by a regex, so on those the model is not earning its
 cost.
+
+### Quarantine is where an LLM triage tool usually starts doing harm
+
+A test is flaky, so it gets quarantined to unblock the pipeline. The quarantine has
+no expiry, nobody owns it, and there is no route back. Two years later the suite has
+three hundred quarantined tests and the ones that were catching real bugs have been
+silently not catching them the whole time. The quarantine list has become a deletion
+list nobody had to argue for.
+
+Everything in the policy engine exists to make that outcome structurally awkward:
+
+- **Four conditions, all required**, and any failure is reported as a named refusal
+  reason rather than a silent absence — "why not this one?" is a question the output
+  should already answer.
+- **The model can veto but never cause.** A model that hallucinated
+  `RACE_CONDITION` on every test in the suite could not quarantine anything the
+  flake rate had not already condemned. There is a test asserting exactly that.
+- **The regression check consults both layers** — detector verdict and model cause
+  — and either one saying "regression" refuses. They can disagree, and requiring
+  agreement would let a defect through whenever one was wrong.
+- **Expired and released are different states.** Released means the test earned its
+  way back; expired means the TTL ran out while it was still unstable and a human
+  has to decide. Collapsing them hides the only distinction a reader cares about.
+- **Owner provenance is labelled.** `CODEOWNERS` is a statement of responsibility;
+  the last committer is a guess that happens to be usually right. Showing them
+  identically would let a guess inherit the authority of a declaration.
+- **A quarantined test keeps running.** It stops blocking, not executing — the exit
+  condition is N consecutive clean runs, so a test that stops running can never
+  satisfy it. Nothing in the schema records a test as disabled, because the tool
+  never disables one.
+
+`flaketriage policy` is read-only by default; `--apply` writes to this tool's own
+records and nothing else. See [ADR-0004](docs/adr/0004-quarantine-ttl.md).
 
 ### Observability
 

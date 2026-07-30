@@ -39,6 +39,15 @@ from flaketriage.obs.metrics import (
     record_classifications,
     summarize,
 )
+from flaketriage.policy.quarantine import QuarantineRecommendation, QuarantineState
+from flaketriage.policy.records import (
+    QuarantineRecord,
+    close,
+    expire_overdue,
+    list_quarantines,
+    open_quarantine_ids,
+    record_recommendation,
+)
 from flaketriage.store.db import connect, transaction
 
 log = get_logger(__name__)
@@ -462,6 +471,48 @@ class RunStore:
                 cache_hits=cache_hits,
             )
         return recorded_calls, recorded_classifications
+
+    # -- quarantine ---------------------------------------------------------
+
+    def record_quarantines(self, recommendations: Sequence[QuarantineRecommendation]) -> int:
+        """Persist recommendations. Duplicates are skipped, not errors."""
+        recorded = 0
+        with transaction(self._connection) as connection:
+            for recommendation in recommendations:
+                if record_recommendation(connection, recommendation) is not None:
+                    recorded += 1
+        return recorded
+
+    def open_quarantine_ids(self) -> frozenset[int]:
+        return open_quarantine_ids(self._connection)
+
+    def quarantines(self, *, open_only: bool = True) -> list[QuarantineRecord]:
+        return list_quarantines(self._connection, open_only=open_only)
+
+    def expire_overdue_quarantines(self) -> list[QuarantineRecord]:
+        with transaction(self._connection) as connection:
+            return expire_overdue(connection)
+
+    def release_quarantine(self, record_id: int, *, clean_runs: int) -> bool:
+        with transaction(self._connection) as connection:
+            return close(
+                connection,
+                record_id,
+                state=QuarantineState.RELEASED,
+                reason=f"{clean_runs} consecutive clean execution(s)",
+            )
+
+    def recent_outcomes(self, identity_id: int, *, limit: int = 50) -> list[bool]:
+        """Newest-first pass/fail flags for a test, for the de-quarantine check.
+
+        Skips are omitted rather than counted as clean: a test that did not run
+        has not earned its way out of quarantine.
+        """
+        return [
+            record.outcome.is_pass
+            for record in self.executions_for_group(identity_id, limit=limit)
+            if record.outcome.counts_as_observation
+        ]
 
     def metrics_summary(self, *, since: str | None = None) -> MetricsSummary:
         return summarize(self._connection, since=since)

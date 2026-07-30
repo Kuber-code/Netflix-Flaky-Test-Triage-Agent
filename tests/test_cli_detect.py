@@ -292,3 +292,93 @@ def test_stats_rejects_an_unparseable_window(workspace: Path) -> None:
     code, output = invoke(workspace, "stats", "--since", "yesterday-ish")
     assert code == 1
     assert "cannot parse" in output
+
+
+def seed_quarantine_candidate(workspace: Path) -> None:
+    """Twelve runs of a test that diverges at one commit: over both thresholds."""
+    for index in range(6):
+        for attempt, failing in ((1, index in (1, 3)), (2, False)):
+            path = workspace / f"q-{index}-{attempt}.xml"
+            path.write_text(junit("test_flaky_thing", failing), encoding="utf-8")
+            code, output = invoke(
+                workspace,
+                "ingest",
+                "--results",
+                str(path),
+                "--sha",
+                f"sha{index:04d}",
+                "--run-id",
+                f"run-{index}",
+                "--attempt",
+                str(attempt),
+                "--started-at",
+                f"2026-07-{15 + index:02d}T09:00:00+00:00",
+            )
+            assert code == 0, output
+
+
+def test_policy_is_read_only_by_default(workspace: Path) -> None:
+    """Nothing is written unless --apply is passed."""
+    seed_quarantine_candidate(workspace)
+    code, output = invoke(workspace, "policy")
+    assert code == 0, output
+    assert "Read-only" in output
+
+    code, output = invoke(workspace, "policy", "--json")
+    assert code == 0, output
+    assert json.loads(output)["applied"] is False
+    assert json.loads(output)["open_quarantines"] == []
+
+
+def test_policy_apply_records_a_recommendation(workspace: Path) -> None:
+    seed_quarantine_candidate(workspace)
+    code, output = invoke(workspace, "policy", "--apply", "--json")
+    assert code == 0, output
+    payload = json.loads(output)
+    assert payload["applied"] is True
+    assert len(payload["recommendations"]) == 1
+
+    recommendation = payload["recommendations"][0]
+    assert recommendation["ttl_days"] == 14
+    assert recommendation["expires_at"]
+    assert recommendation["clean_runs_required"] == 20
+
+    # The record persists for the next invocation.
+    code, output = invoke(workspace, "policy", "--show-quarantine", "--json")
+    assert code == 0, output
+    assert len(json.loads(output)["open_quarantines"]) == 1
+
+
+def test_policy_does_not_recommend_the_same_test_twice(workspace: Path) -> None:
+    seed_quarantine_candidate(workspace)
+    invoke(workspace, "policy", "--apply")
+    code, output = invoke(workspace, "policy", "--json")
+    assert code == 0, output
+    payload = json.loads(output)
+    assert payload["recommendations"] == []
+    refusals = {item["refusal"] for item in payload["refusals"]}
+    assert "already_quarantined" in refusals
+
+
+def test_policy_reports_refusals_with_a_reason(workspace: Path) -> None:
+    """ "Why not this one?" is a question the output should already answer."""
+    seed_flaky(workspace)  # only two observations
+    code, output = invoke(workspace, "policy", "--json")
+    assert code == 0, output
+    refusals = {item["refusal"] for item in json.loads(output)["refusals"]}
+    assert "insufficient_observations" in refusals
+
+
+def test_policy_expiring_filter(workspace: Path) -> None:
+    seed_quarantine_candidate(workspace)
+    invoke(workspace, "policy", "--apply")
+    code, output = invoke(workspace, "policy", "--expiring", "--json")
+    assert code == 0, output
+    # A fresh 14-day TTL is not expiring within the default window.
+    assert json.loads(output)["open_quarantines"] == []
+
+
+def test_policy_without_a_store_fails_with_a_useful_message(workspace: Path) -> None:
+    code, output = invoke(workspace, "policy")
+    assert code == 1
+    assert "No run store" in output

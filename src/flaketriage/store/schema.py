@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from typing import Final
 
-SCHEMA_VERSION: Final = 2
+SCHEMA_VERSION: Final = 3
 
 _MIGRATION_1: Final = """
 CREATE TABLE runs (
@@ -176,5 +176,41 @@ CREATE INDEX idx_classifications_identity ON classifications (identity_id, id DE
 CREATE INDEX idx_classifications_created ON classifications (created_at);
 """
 
+
+# Phase P7: quarantine decisions. Note what is NOT here: no column says the test
+# was disabled. A quarantined test keeps running and merely stops blocking, because
+# without continued execution there is no data to de-quarantine on -- a quarantine
+# with no exit condition is a permanent deletion with extra steps.
+_MIGRATION_3: Final = """
+CREATE TABLE quarantines (
+    id             INTEGER PRIMARY KEY,
+    identity_id    INTEGER NOT NULL REFERENCES test_identities (id),
+    state          TEXT    NOT NULL
+                   CHECK (state IN ('recommended', 'active', 'expired', 'released')),
+    cause          TEXT    NOT NULL DEFAULT 'UNKNOWN',
+    reason         TEXT    NOT NULL DEFAULT '',
+    flake_rate     REAL    NOT NULL DEFAULT 0,
+    observations   INTEGER NOT NULL DEFAULT 0,
+    owner          TEXT    NOT NULL DEFAULT '',
+    owner_source   TEXT    NOT NULL DEFAULT 'unresolved',
+    ttl_days       INTEGER NOT NULL,
+    clean_runs_required INTEGER NOT NULL DEFAULT 0,
+    created_at     TEXT    NOT NULL,
+    expires_at     TEXT    NOT NULL,
+    closed_at      TEXT,
+    close_reason   TEXT
+);
+
+-- A test can have at most one open quarantine. Enforced by the database rather
+-- than by the code that writes it, because "recommend it twice" is exactly what a
+-- retried CI job would otherwise do.
+CREATE UNIQUE INDEX idx_quarantine_open
+    ON quarantines (identity_id)
+    WHERE state IN ('recommended', 'active');
+
+CREATE INDEX idx_quarantine_expiry ON quarantines (expires_at);
+CREATE INDEX idx_quarantine_state ON quarantines (state, expires_at);
+"""
+
 # Forward-only. Index i applies version i+1; never edit a shipped entry.
-MIGRATIONS: Final[tuple[str, ...]] = (_MIGRATION_1, _MIGRATION_2)
+MIGRATIONS: Final[tuple[str, ...]] = (_MIGRATION_1, _MIGRATION_2, _MIGRATION_3)
