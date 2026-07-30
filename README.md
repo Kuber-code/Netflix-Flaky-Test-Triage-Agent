@@ -4,10 +4,10 @@ Deterministic flaky-test detection for CI, with an LLM used only to propose a
 likely cause. The detector works with the model switched off; the model never
 makes a decision that changes CI state.
 
-> **Build status: in progress.** Phases are implemented in the order given in
-> [the build specification](flaky-triage-agent-REQUIREMENTS.md#9-build-phases).
-> See [Build status](#build-status) for what currently exists. Sections that
-> depend on measurement are marked as pending rather than filled with estimates.
+All nine build phases of [the specification](flaky-triage-agent-REQUIREMENTS.md)
+are implemented. Structure and data flow are in
+[ARCHITECTURE.md](ARCHITECTURE.md); the reasoning behind each contentious choice
+is in the five [ADRs](docs/adr/).
 
 ## The problem
 
@@ -49,19 +49,20 @@ JUnit XML + git diff + run metadata
    CLI report      PR comment
 ```
 
-Real output from `flaketriage detect` over eleven ingested runs of a four-test
-suite:
+A full transcript of one pipeline run -- ingest, detect, triage, policy, stats --
+is in [docs/demo.md](docs/demo.md). Real output from `flaketriage detect` over
+twelve ingested runs of a four-test suite:
 
 ```
 verdict     conf    rate  obs  test
-regression  high      0%   11  tests/integration/test_checkout.py::test_totals_include_tax
-flaky       medium   30%   10  tests/integration/test_checkout.py::test_payment_capture
-flaky       medium   21%   11  tests/integration/test_checkout.py::test_concurrent_checkout
+regression  high      0%   12  tests/integration/test_checkout.py::test_totals_include_tax
+flaky       medium   30%   11  tests/integration/test_checkout.py::test_payment_capture
+flaky       medium   21%   12  tests/integration/test_checkout.py::test_concurrent_checkout
 
 tests/integration/test_checkout.py::test_payment_capture
   - same_sha_divergence: 1 commit(s) produced both a pass and a failure; most recent: b91f4a2d7e0c
   - cross_attempt_divergence: outcome differed between attempts at b91f4a2d7e0c (attempts 1, 2)
-  - historical_instability: flake rate 30.0% over 10 observations exceeds 5.0%,
+  - historical_instability: flake rate 30.0% over 11 observations exceeds 5.0%,
     measured from same-commit divergence
 
 2 flaky, 1 regression, 0 persistent, 0 new, 1 healthy
@@ -69,8 +70,8 @@ tests/integration/test_checkout.py::test_payment_capture
 
 Three things in that output are the point of the project. The regressing test is
 called a **regression, not a flake**, even though it started failing partway
-through the window. `test_payment_capture` shows **10 observations where the
-others show 11** — one of its failures was a runner disk-full error, excluded from
+through the window. `test_payment_capture` shows **11 observations where the
+others show 12** — one of its failures was a runner disk-full error, excluded from
 the flake rate entirely. And every row carries a **confidence level**, because
 "diverged at one commit yesterday" and "the flip rate crept over five percent"
 are both "flaky" and are not the same claim.
@@ -127,6 +128,11 @@ On Windows, where GNU make is not present, `.\make.ps1 check` runs the same gate
 because PowerShell and cmd do not expand them. Re-ingesting the same run,
 attempt and shard is a no-op rather than a duplicate: CI retries ingest steps,
 and double-counting observations would corrupt every flake rate downstream.
+
+## How it works
+
+The four sections below are the parts where the obvious implementation is wrong in
+a way that only shows up later.
 
 ### What the ingest layer handles
 
@@ -210,98 +216,6 @@ weaker — a test that was genuinely fixed also flips — so detections resting 
 are reported at low confidence, and `retry_data_available: false` appears in the
 JSON output rather than being averaged into one indistinguishable number.
 
-## Build status
-
-| Phase | Deliverable | Status |
-|---|---|---|
-| P0 | Scaffolding: uv project, ruff/mypy/pytest, Makefile, CI, CLI surface | done |
-| P1 | Ingest: JUnit XML, diff parser, SQLite schema, `ingest` | done |
-| P2 | Identity: alias resolution across renames and moves | done |
-| P3 | Detector: four signals, regression path, confidence, `detect`/`report` | done |
-| P4 | Classifier: schema validation, repair retry, abstention, cache, prefilter | done |
-| P5 | Evaluation harness, labeled corpus, baseline, results table | done |
-| P6 | Cost controls and observability: `stats`, Prometheus output | done |
-| P7 | Policy engine: quarantine rules, TTL, ownership, de-quarantine | done |
-| P8 | Interfaces: PR comment renderer, `action.yml`, example workflow | done |
-| P9 | Docs: README as design doc, ARCHITECTURE, ADRs | pending |
-
-Unimplemented CLI commands exit non-zero with an explicit message. They do not
-exit 0 and return nothing, because a missing feature that looks like an empty
-result is worse than a missing feature.
-
-## Cost and latency
-
-Measured against the real API on a two-test corpus, cold cache:
-
-| call | model | input tok | output tok | cost | latency |
-|---|---|---|---|---|---|
-| prefilter | `claude-haiku-4-5` | 539 | 8 | $0.00058 | 1.1s |
-| classify | `claude-sonnet-5` | 2498 | 362 | $0.01292 | 4.2s |
-
-**~$0.0134 per classified test** cold; **$0.00 warm** — a second identical
-invocation was a 100% cache hit. The input side of the classify call dominates and
-most of it is the system prompt carrying the taxonomy, so context assembly is the
-cost lever rather than output length. Prompt caching for that stable block is the
-obvious next step and is deliberately unbuilt until P5 can measure the saving.
-
-Three constraints found by calling the API rather than by assuming, all recorded in
-[ADR-0005](docs/adr/0005-two-tier-model-cost-strategy.md):
-
-- **`claude-sonnet-5` rejects `temperature`** with a 400. The client drops it and
-  retries, remembering the model. So the spec's "temperature 0 for reproducibility"
-  is not fully available on the configured classifier; attributability comes from
-  the recorded model id and prompt-version hash instead.
-- **The structured-output schema dialect is a subset of JSON Schema** — `minimum`
-  and `maximum` on a number are rejected. That is the concrete reason the Pydantic
-  validation layer is not redundant with the API's own enforcement.
-- **The first content block is not necessarily text.** A reasoning model emits a
-  thinking block first, so `content[0].text` is a latent crash.
-
-## Results
-
-Full table in [eval/results/latest.md](eval/results/latest.md), regenerated by
-`make eval`. 49 hand-labelled examples across all nine taxonomy classes, 13 of them
-constructed adversarially.
-
-| metric | keyword baseline | LLM classifier |
-|---|---|---|
-| **dangerous-error rate** (`REAL_REGRESSION` called a flake) | **20.0%** | **0.0%** |
-| overall accuracy | 77.6% | 91.8% |
-| macro F1 | 0.756 | 0.915 |
-| abstention rate | 32.7% | 12.2% |
-| accuracy when answering | 93.9% | **90.7%** |
-| accuracy on adversarial cases | 46.2% | 84.6% |
-
-The dangerous-error rate is listed first because it is the only metric here with an
-asymmetric cost. Every other error wastes a reader's time; this one tells an
-engineer to ignore a real bug. The baseline scores 20% on it for a structural
-reason, not a tuning one: no keyword distinguishes "this failure is a real defect"
-from "this failure is noise", because that judgement needs the history and the
-diff. That gap is the entire justification for the LLM layer.
-
-Note the one place the baseline is ahead in the headline table: **accuracy when
-answering**, 93.9% against 90.7%. The baseline abstains on a third of the corpus
-and is more often right on the rest. Reporting that number without its companion
-abstention rate would be the easiest available way to mislead with this table,
-which is why both are always shown together.
-
-### Where the baseline wins — and it does
-
-| class | baseline F1 | LLM F1 |
-|---|---|---|
-| `INFRA_FLAKE` | **1.00** | 0.75 |
-| `RESOURCE_EXHAUSTION` | **1.00** | 0.80 |
-| `EXTERNAL_DEPENDENCY` | 1.00 | 1.00 |
-| `TEST_ORDER_DEPENDENCY` | 1.00 | 1.00 |
-| `UNKNOWN` (recall) | **88%** | 75% |
-
-The LLM recalls only 60% of `INFRA_FLAKE` cases where a keyword list gets all five.
-That is worth more than the aggregate win, and it points somewhere concrete: infra
-detection should stay deterministic, which is exactly where it already lives — the
-detector excludes platform failures from the flake rate by pattern before any model
-runs. Four classes are matched by a regex, so on those the model is not earning its
-cost.
-
 ### Quarantine is where an LLM triage tool usually starts doing harm
 
 A test is flaky, so it gets quarantined to unblock the pipeline. The quarantine has
@@ -349,12 +263,99 @@ classifier had something to say. And the cache hit rate divides by classificatio
 cache got worse, because every miss adds to the denominator and every hit adds
 nothing.
 
+## Build status
+
+Every phase is done. The table is kept because the order was load-bearing: each
+phase had to be committed working, with tests, before the next began, and several
+of the more useful findings came from a later phase exercising an earlier one.
+
+| Phase | Deliverable | Status |
+|---|---|---|
+| P0 | Scaffolding: uv project, ruff/mypy/pytest, Makefile, CI, CLI surface | done |
+| P1 | Ingest: JUnit XML, diff parser, SQLite schema, `ingest` | done |
+| P2 | Identity: alias resolution across renames and moves | done |
+| P3 | Detector: four signals, regression path, confidence, `detect`/`report` | done |
+| P4 | Classifier: schema validation, repair retry, abstention, cache, prefilter | done |
+| P5 | Evaluation harness, labeled corpus, baseline, results table | done |
+| P6 | Cost controls and observability: `stats`, Prometheus output | done |
+| P7 | Policy engine: quarantine rules, TTL, ownership, de-quarantine | done |
+| P8 | Interfaces: PR comment renderer, `action.yml`, example workflow | done |
+| P9 | Docs: README as design doc, ARCHITECTURE, five ADRs | done |
+
+Design records:
+
+| ADR | Decision |
+|---|---|
+| [0001](docs/adr/0001-deterministic-core-llm-advisory.md) | Deterministic core, LLM advisory |
+| [0002](docs/adr/0002-test-identity-strategy.md) | Test identity and explicit, labelled aliasing |
+| [0003](docs/adr/0003-abstention-over-guessing.md) | Abstention over guessing |
+| [0004](docs/adr/0004-quarantine-ttl.md) | Quarantine carries a TTL, an owner, and an exit condition |
+| [0005](docs/adr/0005-two-tier-model-cost-strategy.md) | Two-tier model strategy and cost controls |
+
+## Results
+
+Full table in [eval/results/latest.md](eval/results/latest.md), regenerated by
+`make eval`. 49 hand-labelled examples across all nine taxonomy classes, 13 of them
+constructed adversarially.
+
+| metric | keyword baseline | LLM classifier |
+|---|---|---|
+| **dangerous-error rate** (`REAL_REGRESSION` called a flake) | **20.0%** | **0.0%** |
+| overall accuracy | 77.6% | 91.8% |
+| macro F1 | 0.756 | 0.915 |
+| abstention rate | 32.7% | 12.2% |
+| accuracy when answering | 93.9% | **90.7%** |
+| accuracy on adversarial cases | 46.2% | 84.6% |
+
+The dangerous-error rate is listed first because it is the only metric here with an
+asymmetric cost. Every other error wastes a reader's time; this one tells an
+engineer to ignore a real bug. The baseline scores 20% on it for a structural
+reason, not a tuning one: no keyword distinguishes "this failure is a real defect"
+from "this failure is noise", because that judgement needs the history and the
+diff. That gap is the entire justification for the LLM layer.
+
+Note the one place the baseline is ahead in the headline table: **accuracy when
+answering**, 93.9% against 90.7%. The baseline abstains on a third of the corpus
+and is more often right on the rest. Reporting that number without its companion
+abstention rate would be the easiest available way to mislead with this table,
+which is why both are always shown together.
+
+### Where the baseline wins — and it does
+
+| class | baseline F1 | LLM F1 |
+|---|---|---|
+| `INFRA_FLAKE` | **1.00** | 0.75 |
+| `RESOURCE_EXHAUSTION` | **1.00** | 0.80 |
+| `EXTERNAL_DEPENDENCY` | 1.00 | 1.00 |
+| `TEST_ORDER_DEPENDENCY` | 1.00 | 1.00 |
+| `UNKNOWN` (recall) | **88%** | 75% |
+
+The LLM recalls only 60% of `INFRA_FLAKE` cases where a keyword list gets all five.
+That is worth more than the aggregate win, and it points somewhere concrete: infra
+detection should stay deterministic, which is exactly where it already lives — the
+detector excludes platform failures from the flake rate by pattern before any model
+runs. Four classes are matched by a regex, so on those the model is not earning its
+cost.
+
 ### Measured cost and latency
 
 Cold run over the full corpus: 99 API calls, **$0.6860 total, $0.0140 per
 example**, P50 5.1s and P95 9.1s per classification. An immediate re-run is a
 **100% cache hit at $0.00**. The repair retry fired and recovered 3 malformed
 responses. 2 example(s) were stopped by the cheap-model gate.
+
+Three constraints found by calling the API rather than by assuming, all recorded in
+[ADR-0005](docs/adr/0005-two-tier-model-cost-strategy.md):
+
+- **`claude-sonnet-5` rejects `temperature`** with a 400. The client drops it and
+  retries, remembering the model. So the spec's "temperature 0 for reproducibility"
+  is not fully available on the configured classifier; attributability comes from
+  the recorded model id and prompt-version hash instead.
+- **The structured-output schema dialect is a subset of JSON Schema** — `minimum`
+  and `maximum` on a number are rejected. That is the concrete reason the Pydantic
+  validation layer is not redundant with the API's own enforcement.
+- **The first content block is not necessarily text.** A reasoning model emits a
+  thinking block first, so `content[0].text` is a latent crash.
 
 ### What these numbers do not show
 
@@ -422,6 +423,45 @@ Stated up front because they bound what any results figure can mean.
 7. **Quarantine granularity is per-test**, which is the wrong unit for an
    order-dependency flake: that failure is a property of a *pair* of tests, and
    quarantining whichever one happened to fail treats a symptom.
+
+## What I would do differently, and what is next
+
+Three concrete things, in the order I would actually do them.
+
+**1. Replace the synthetic corpus with real anonymized failures.** This is the
+weakest link in the whole repository and no amount of engineering elsewhere
+compensates for it. Every accuracy number above is computed against 49 examples I
+wrote myself, and I also wrote the prompt — so some of the classifier's margin is
+probably shared vocabulary rather than shared reasoning. The fix is not more
+synthetic examples; it is a few hundred real traces from a real suite, labelled by
+somebody who is not me. Until that exists, the honest reading of the results table
+is "the guardrails behave as designed on realistic-looking input", not "91.8%
+accurate".
+
+**2. Cascade the classifier instead of gating it.** The eval says four classes are
+matched outright by a keyword list, and the model loses on `INFRA_FLAKE` recall
+(60% against 100%). The current prefilter asks the wrong question: it decides
+*whether* to spend a call, when the useful question is *which* model should answer.
+A cascade — deterministic rules first, escalate only for the classes where the LLM
+measurably wins — would cut cost substantially and *improve* accuracy on the
+classes where it currently regresses. I did not build it because doing it before
+having the measurement would have been guessing, and the measurement is what says
+which classes to route.
+
+**3. Add prompt caching, then re-measure.** The classify call spends ~2500 input
+tokens against ~360 output, and most of the input is the stable taxonomy block sent
+on every call. That is the single largest cost lever and it changes nothing about
+behaviour. It is unbuilt for the same reason as (2): I would rather report
+$0.0140 per test measured than a projected saving.
+
+Two things I would change about how I built it rather than about what it does.
+I would write the demo corpus **before** the detector rather than after — running
+it is what exposed the flake-rate denominator bug, and the unit tests were happily
+confirming the wrong definition until then. And I would have called the API on day
+one instead of at phase P4: five of the constraints that shaped the client
+(`temperature` rejected, the schema dialect subset, thinking blocks before text)
+are things no amount of careful design would have predicted, and two of them would
+have changed earlier decisions.
 
 ## Configuration
 
