@@ -34,6 +34,7 @@ from flaketriage.policy import (
     CodeOwners,
     QuarantineRecommendation,
     QuarantineRecord,
+    QuarantineStore,
     RefusalReason,
     consecutive_clean_runs,
     should_release,
@@ -455,8 +456,9 @@ def policy(
     with RunStore.open(store_path) as store:
         # TTL is applied on read: there is no daemon, so a TTL that only advanced
         # while something was running would never advance at all.
-        expired = store.expire_overdue_quarantines() if apply_changes else []
-        open_ids = store.open_quarantine_ids()
+        quarantines = QuarantineStore(store.connection)
+        expired = quarantines.expire_overdue() if apply_changes else []
+        open_ids = quarantines.open_ids()
         codeowners = CodeOwners.load(state.config.root)
 
         recommendations = [
@@ -473,14 +475,14 @@ def policy(
 
         released: list[str] = []
         if apply_changes:
-            store.record_quarantines([r for r in recommendations if r.recommended])
-            for record in store.quarantines():
+            quarantines.record([r for r in recommendations if r.recommended])
+            for record in quarantines.records():
                 clean = consecutive_clean_runs(store.recent_outcomes(record.identity_id))
                 if should_release(clean, state.config.policy):
-                    store.release_quarantine(record.record_id, clean_runs=clean)
+                    quarantines.release(record.record_id, clean_runs=clean)
                     released.append(record.test)
 
-        records = store.quarantines()
+        records = quarantines.records()
 
     if expiring:
         records = [record for record in records if record.expiring()]

@@ -43,7 +43,7 @@ packages = ["src/flaketriage"]
 [tool.ruff]
 line-length = 100
 target-version = "py312"
-src = ["src", "tests", "eval"]
+src = ["src", "tests", "eval", "scripts"]
 
 [tool.ruff.lint]
 select = [
@@ -75,13 +75,15 @@ ignore = [
 # (Playwright's U+203A separator), so ambiguous-unicode is off for tests.
 "tests/**" = ["S101", "ANN201", "ARG001", "T20", "RUF001"]
 "eval/**" = ["T20"]
+# A CI gate script reports to a human through stdout; that is its whole job.
+"scripts/**" = ["T20"]
 
 [tool.mypy]
 python_version = "3.12"
 strict = true
 warn_unreachable = true
 disallow_any_unimported = true
-files = ["src", "tests", "eval"]
+files = ["src", "tests", "eval", "scripts"]
 
 [[tool.mypy.overrides]]
 module = ["hypothesis.*"]

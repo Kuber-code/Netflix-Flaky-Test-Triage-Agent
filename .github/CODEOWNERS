@@ -1,0 +1,30 @@
+# Code owners.
+#
+# This file is real ownership metadata for the repository, and it is also the
+# input the policy engine reads when a quarantine recommendation needs an owner.
+# Without it, every recommendation falls back to "last committer to the file",
+# which is a guess -- so the demo showed `unresolved` and the fallback path was
+# never exercised against a real declaration.
+#
+# The last matching rule wins, which is GitHub's own precedence and what
+# flaketriage.policy.ownership implements.
+
+# Default owner for everything not matched below.
+*                       @Kuber-code
+
+# The deterministic core. A bug here is wrong output, not a worse suggestion,
+# which is why it is held to a higher coverage floor than the classifier.
+/src/flaketriage/detect/     @Kuber-code
+/src/flaketriage/identity/   @Kuber-code
+/src/flaketriage/policy/     @Kuber-code
+
+# The evaluation harness and its corpus. Changes here move published numbers, so
+# they warrant the same scrutiny as changes to the thing being measured.
+/eval/                  @Kuber-code
+
+# Design records are append-mostly; editing a shipped ADR rewrites history.
+/docs/adr/              @Kuber-code
+
+# Thresholds are behaviour. A change to this file changes what the tool decides
+# without changing a line of code.
+/flaketriage.toml       @Kuber-code

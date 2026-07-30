@@ -22,6 +22,7 @@ from flaketriage.policy.quarantine import (
     is_expired,
     is_expiring,
 )
+from flaketriage.store.db import transaction
 
 
 class QuarantineRecord(Frozen):
@@ -165,6 +166,52 @@ def expire_overdue(
             reason=f"ttl of {record.ttl_days} day(s) elapsed while still unstable",
         )
     return overdue
+
+
+class QuarantineStore:
+    """Quarantine persistence, owned by the policy layer.
+
+    Deliberately *not* methods on ``RunStore``. Putting them there created a
+    circular import -- ``policy`` needs ``detect``, ``detect`` needs ``store``, and
+    ``store`` then needed ``policy`` for the type annotations. It happened to work
+    when the modules were imported in one particular order through the CLI and blew
+    up the moment anything imported ``flaketriage.policy`` first.
+
+    The direction that is allowed is ``policy -> store``: the policy layer knows
+    about storage, storage knows nothing about policy. So the SQL lives here, next
+    to the rules it serves, and takes a connection it does not own.
+    """
+
+    def __init__(self, connection: sqlite3.Connection) -> None:
+        self._connection = connection
+
+    def record(self, recommendations: Sequence[QuarantineRecommendation]) -> int:
+        """Persist recommendations. Duplicates are skipped, not errors."""
+        recorded = 0
+        with transaction(self._connection) as connection:
+            for recommendation in recommendations:
+                if record_recommendation(connection, recommendation) is not None:
+                    recorded += 1
+        return recorded
+
+    def open_ids(self) -> frozenset[int]:
+        return open_quarantine_ids(self._connection)
+
+    def records(self, *, open_only: bool = True) -> list[QuarantineRecord]:
+        return list_quarantines(self._connection, open_only=open_only)
+
+    def expire_overdue(self) -> list[QuarantineRecord]:
+        with transaction(self._connection) as connection:
+            return expire_overdue(connection)
+
+    def release(self, record_id: int, *, clean_runs: int) -> bool:
+        with transaction(self._connection) as connection:
+            return close(
+                connection,
+                record_id,
+                state=QuarantineState.RELEASED,
+                reason=f"{clean_runs} consecutive clean execution(s)",
+            )
 
 
 def _record_from_row(row: sqlite3.Row) -> QuarantineRecord:

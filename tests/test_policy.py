@@ -24,6 +24,7 @@ from flaketriage.policy import (
     OwnerSource,
     QuarantineRecommendation,
     QuarantineState,
+    QuarantineStore,
     RefusalReason,
     consecutive_clean_runs,
     evaluate,
@@ -343,9 +344,9 @@ def seed(store: RunStore, name: str = "test_login") -> int:
 def test_a_recommendation_is_persisted_and_listed(store: RunStore) -> None:
     identity_id = seed(store)
     recommendation = decide(flaky_detection().model_copy(update={"identity_id": identity_id}))
-    assert store.record_quarantines([recommendation]) == 1
+    assert QuarantineStore(store.connection).record([recommendation]) == 1
 
-    (record,) = store.quarantines()
+    (record,) = QuarantineStore(store.connection).records()
     assert record.state is QuarantineState.RECOMMENDED
     assert record.identity_id == identity_id
     assert record.expires_at == recommendation.expires_at
@@ -356,9 +357,9 @@ def test_recording_the_same_recommendation_twice_is_a_no_op(store: RunStore) -> 
     """A retried CI job re-derives the same recommendation from the same history."""
     identity_id = seed(store)
     recommendation = decide(flaky_detection().model_copy(update={"identity_id": identity_id}))
-    assert store.record_quarantines([recommendation]) == 1
-    assert store.record_quarantines([recommendation]) == 0
-    assert len(store.quarantines()) == 1
+    assert QuarantineStore(store.connection).record([recommendation]) == 1
+    assert QuarantineStore(store.connection).record([recommendation]) == 0
+    assert len(QuarantineStore(store.connection).records()) == 1
 
 
 def test_refusals_are_never_persisted(store: RunStore) -> None:
@@ -366,16 +367,16 @@ def test_refusals_are_never_persisted(store: RunStore) -> None:
     refused = decide(
         flaky_detection(observations=2).model_copy(update={"identity_id": identity_id})
     )
-    assert store.record_quarantines([refused]) == 0
-    assert store.quarantines() == []
+    assert QuarantineStore(store.connection).record([refused]) == 0
+    assert QuarantineStore(store.connection).records() == []
 
 
 def test_open_quarantine_ids_feed_the_already_quarantined_check(store: RunStore) -> None:
     identity_id = seed(store)
-    store.record_quarantines(
+    QuarantineStore(store.connection).record(
         [decide(flaky_detection().model_copy(update={"identity_id": identity_id}))]
     )
-    assert store.open_quarantine_ids() == frozenset({identity_id})
+    assert QuarantineStore(store.connection).open_ids() == frozenset({identity_id})
 
 
 def test_an_expired_quarantine_is_closed_and_reported(store: RunStore) -> None:
@@ -387,12 +388,12 @@ def test_an_expired_quarantine_is_closed_and_reported(store: RunStore) -> None:
     identity_id = seed(store)
     stale = decide(flaky_detection().model_copy(update={"identity_id": identity_id}))
     past = (datetime.now(UTC) - timedelta(days=1)).isoformat()
-    store.record_quarantines([stale.model_copy(update={"expires_at": past})])
+    QuarantineStore(store.connection).record([stale.model_copy(update={"expires_at": past})])
 
-    expired = store.expire_overdue_quarantines()
+    expired = QuarantineStore(store.connection).expire_overdue()
     assert len(expired) == 1
-    assert store.quarantines() == []
-    (closed,) = store.quarantines(open_only=False)
+    assert QuarantineStore(store.connection).records() == []
+    (closed,) = QuarantineStore(store.connection).records(open_only=False)
     assert closed.state is QuarantineState.EXPIRED
     assert closed.close_reason is not None
     assert "ttl" in closed.close_reason
@@ -400,45 +401,45 @@ def test_an_expired_quarantine_is_closed_and_reported(store: RunStore) -> None:
 
 def test_a_released_quarantine_records_why(store: RunStore) -> None:
     identity_id = seed(store)
-    store.record_quarantines(
+    QuarantineStore(store.connection).record(
         [decide(flaky_detection().model_copy(update={"identity_id": identity_id}))]
     )
-    (record,) = store.quarantines()
+    (record,) = QuarantineStore(store.connection).records()
 
-    assert store.release_quarantine(record.record_id, clean_runs=20) is True
-    assert store.quarantines() == []
-    (closed,) = store.quarantines(open_only=False)
+    assert QuarantineStore(store.connection).release(record.record_id, clean_runs=20) is True
+    assert QuarantineStore(store.connection).records() == []
+    (closed,) = QuarantineStore(store.connection).records(open_only=False)
     assert closed.state is QuarantineState.RELEASED
     assert closed.close_reason == "20 consecutive clean execution(s)"
 
 
 def test_closing_an_already_closed_quarantine_is_a_no_op(store: RunStore) -> None:
     identity_id = seed(store)
-    store.record_quarantines(
+    QuarantineStore(store.connection).record(
         [decide(flaky_detection().model_copy(update={"identity_id": identity_id}))]
     )
-    (record,) = store.quarantines()
-    assert store.release_quarantine(record.record_id, clean_runs=20) is True
-    assert store.release_quarantine(record.record_id, clean_runs=20) is False
+    (record,) = QuarantineStore(store.connection).records()
+    assert QuarantineStore(store.connection).release(record.record_id, clean_runs=20) is True
+    assert QuarantineStore(store.connection).release(record.record_id, clean_runs=20) is False
 
 
 def test_a_closed_quarantine_frees_the_test_to_be_recommended_again(store: RunStore) -> None:
     identity_id = seed(store)
     recommendation = decide(flaky_detection().model_copy(update={"identity_id": identity_id}))
-    store.record_quarantines([recommendation])
-    (record,) = store.quarantines()
-    store.release_quarantine(record.record_id, clean_runs=20)
+    QuarantineStore(store.connection).record([recommendation])
+    (record,) = QuarantineStore(store.connection).records()
+    QuarantineStore(store.connection).release(record.record_id, clean_runs=20)
 
-    assert store.open_quarantine_ids() == frozenset()
-    assert store.record_quarantines([recommendation]) == 1
+    assert QuarantineStore(store.connection).open_ids() == frozenset()
+    assert QuarantineStore(store.connection).record([recommendation]) == 1
 
 
 def test_state_counts_are_summarizable(store: RunStore) -> None:
     identity_id = seed(store)
-    store.record_quarantines(
+    QuarantineStore(store.connection).record(
         [decide(flaky_detection().model_copy(update={"identity_id": identity_id}))]
     )
-    assert summarize_states(store.quarantines()) == {"recommended": 1}
+    assert summarize_states(QuarantineStore(store.connection).records()) == {"recommended": 1}
 
 
 def test_recent_outcomes_feeds_the_release_check(store: RunStore) -> None:

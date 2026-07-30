@@ -302,3 +302,64 @@ def test_the_deterministic_core_does_not_import_the_classifier() -> None:
                     offenders.append(f"{package}/{module.name}")
 
     assert offenders == []
+
+
+def test_every_module_imports_standalone() -> None:
+    """No import cycles, checked by importing each module first in a fresh process.
+
+    The layer-boundary test above only looks for imports of `classify`. It did not
+    catch a real cycle introduced later -- policy -> detect -> store -> policy --
+    because the cycle resolved fine when the modules happened to be imported in the
+    order the CLI imports them, and failed only when something imported
+    `flaketriage.policy` first. A subprocess per module is the only way to test
+    "imports cleanly on its own", since the test process has already imported
+    everything.
+    """
+    import subprocess
+    import sys
+
+    root = Path(__file__).resolve().parents[1] / "src"
+    modules = sorted(
+        ".".join(path.relative_to(root).with_suffix("").parts).removesuffix(".__init__")
+        for path in root.rglob("*.py")
+    )
+    assert len(modules) > 20, "expected to find the whole package"
+
+    failures: list[str] = []
+    for module in modules:
+        result = subprocess.run(  # noqa: S603 -- fixed argv, shell=False
+            [sys.executable, "-c", f"import {module}"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            last = result.stderr.strip().splitlines()[-1] if result.stderr.strip() else "?"
+            failures.append(f"{module}: {last}")
+
+    assert failures == [], "modules that do not import standalone:\n" + "\n".join(failures)
+
+
+def test_the_store_layer_does_not_import_the_policy_layer() -> None:
+    """Direction matters: policy knows about storage, storage knows nothing of policy.
+
+    Asserted separately from the cycle test because it is the specific direction
+    that broke, and a cycle test tells you *that* something is wrong rather than
+    which edge to delete.
+    """
+    import ast
+
+    root = Path(__file__).resolve().parents[1] / "src" / "flaketriage" / "store"
+    offenders: list[str] = []
+    for module in root.rglob("*.py"):
+        tree = ast.parse(module.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            names: list[str] = []
+            if isinstance(node, ast.Import):
+                names = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                names = [node.module]
+            if any("flaketriage.policy" in name for name in names):
+                offenders.append(module.name)
+
+    assert offenders == []

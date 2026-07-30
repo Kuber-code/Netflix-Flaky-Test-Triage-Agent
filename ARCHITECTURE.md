@@ -30,6 +30,20 @@ shared vocabulary ended up in `models.py` rather than in the classifier package.
 The types are shared; only the machinery that makes network calls is confined.
 See [ADR-0001](docs/adr/0001-deterministic-core-llm-advisory.md).
 
+**A second direction rule, learned the hard way: `store` knows nothing about
+`policy`.** Quarantine persistence was briefly implemented as methods on
+`RunStore`, which created a cycle — `policy` needs `detect`, `detect` needs
+`store`, and `store` then needed `policy` for its type annotations. It resolved
+fine in the order the CLI imports things and blew up the moment anything imported
+`flaketriage.policy` first. The SQL now lives in `policy/records.py` behind a
+`QuarantineStore` facade that takes a connection it does not own.
+
+Two tests guard this: one imports every module in a fresh subprocess, because a
+test process has already imported everything and cannot detect a cycle by
+importing again; the other asserts the specific `store -> policy` edge is absent,
+because a cycle test tells you *that* something is wrong rather than which edge to
+delete.
+
 ## Data flow
 
 ```

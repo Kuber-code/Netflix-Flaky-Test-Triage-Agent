@@ -44,3 +44,33 @@ jobs:
           name: coverage
           path: coverage.xml
           if-no-files-found: ignore
+
+  eval:
+    name: evaluation harness
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Sync locked environment
+        run: uv sync --all-groups --frozen
+
+      # The corpus is committed, so regenerating it must be a no-op. If this
+      # fails, eval/dataset/corpus.json and its generator have drifted apart and
+      # the committed results describe a corpus that no longer exists.
+      - name: Corpus is reproducible
+        run: |
+          uv run python eval/generate_corpus.py
+          git diff --exit-code --stat eval/dataset/
+
+      # Baseline only: no key, no spend, deterministic, and it refuses to
+      # overwrite the committed results table without an LLM column.
+      - name: Score the baseline
+        run: make eval-baseline
+
+      - name: Committed results table is intact
+        run: git diff --exit-code --stat eval/results/

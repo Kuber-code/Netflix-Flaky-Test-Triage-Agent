@@ -123,6 +123,10 @@ uv run flaketriage triage --no-llm            # complete report, zero API calls
 ```
 
 On Windows, where GNU make is not present, `.\make.ps1 check` runs the same gate.
+`make cov` additionally enforces the specification's 80% coverage floor on
+`detect/`, `identity/` and `policy/` per package — a global threshold would let the
+deterministic core rot while the total stayed healthy, so the criterion is a gate
+rather than a claim.
 
 `ingest` accepts files, directories or globs — globs are expanded in-process
 because PowerShell and cmd do not expand them. Re-ingesting the same run,
@@ -238,7 +242,9 @@ Everything in the policy engine exists to make that outcome structurally awkward
 - **Expired and released are different states.** Released means the test earned its
   way back; expired means the TTL ran out while it was still unstable and a human
   has to decide. Collapsing them hides the only distinction a reader cares about.
-- **Owner provenance is labelled.** `CODEOWNERS` is a statement of responsibility;
+- **Owner provenance is labelled.** This repository has its own
+  [`.github/CODEOWNERS`](.github/CODEOWNERS), which is both real ownership metadata
+  and the input this path reads. `CODEOWNERS` is a statement of responsibility;
   the last committer is a guess that happens to be usually right. Showing them
   identically would let a guess inherit the authority of a declaration.
 - **A quarantined test keeps running.** It stops blocking, not executing — the exit

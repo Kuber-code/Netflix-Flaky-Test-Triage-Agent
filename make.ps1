@@ -3,7 +3,7 @@
 # a contributor on Windows can run the same gate. Usage: .\make.ps1 check
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('help', 'install', 'check', 'lint', 'fmt', 'typecheck', 'test', 'cov', 'eval', 'clean')]
+    [ValidateSet('help', 'install', 'check', 'lint', 'fmt', 'typecheck', 'test', 'cov', 'eval', 'eval-baseline', 'clean')]
     [string]$Target = 'help'
 )
 
@@ -26,14 +26,17 @@ $steps = @{
     fmt       = @(@('run', 'ruff', 'format', '.'), @('run', 'ruff', 'check', '--fix', '.'))
     typecheck = @( , @('run', 'mypy'))
     test      = @( , @('run', 'pytest'))
-    cov       = @( , @('run', 'pytest', '--cov', '--cov-report=term-missing', '--cov-report=xml'))
+    cov       = @(
+        @('run', 'pytest', '--cov', '--cov-report=term-missing', '--cov-report=xml'),
+        @('run', 'python', 'scripts/check_core_coverage.py'))
     eval      = @( , @('run', 'python', 'eval/run_eval.py'))
+    'eval-baseline' = @( , @('run', 'python', 'eval/run_eval.py', '--no-llm'))
 }
 $steps['check'] = $steps['lint'] + $steps['typecheck'] + $steps['test']
 
 switch ($Target) {
     'help' {
-        Write-Host 'Targets: install check lint fmt typecheck test cov eval clean'
+        Write-Host 'Targets: install check lint fmt typecheck test cov eval eval-baseline clean'
     }
     'clean' {
         $paths = @('.pytest_cache', '.mypy_cache', '.ruff_cache', '.hypothesis',

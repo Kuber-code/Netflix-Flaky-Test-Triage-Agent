@@ -1,7 +1,7 @@
 .DEFAULT_GOAL := help
 UV ?= uv
 
-.PHONY: help install check lint fmt typecheck test cov eval clean
+.PHONY: help install check lint fmt typecheck test cov eval eval-baseline clean
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -26,11 +26,15 @@ typecheck: ## mypy --strict
 test: ## Run the test suite
 	$(UV) run pytest
 
-cov: ## Run tests with coverage gates on the deterministic core
+cov: ## Run tests and enforce the coverage floor on the deterministic core
 	$(UV) run pytest --cov --cov-report=term-missing --cov-report=xml
+	$(UV) run python scripts/check_core_coverage.py
 
 eval: ## Run the evaluation harness and rewrite eval/results/latest.md
 	$(UV) run python eval/run_eval.py
+
+eval-baseline: ## Score the baseline only: zero API calls, and never overwrites the table
+	$(UV) run python eval/run_eval.py --no-llm
 
 clean: ## Remove caches and local runtime state
 	rm -rf .pytest_cache .mypy_cache .ruff_cache .hypothesis .coverage coverage.xml htmlcov

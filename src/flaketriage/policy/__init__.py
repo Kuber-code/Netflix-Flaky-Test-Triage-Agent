@@ -26,6 +26,7 @@ from flaketriage.policy.quarantine import (
 )
 from flaketriage.policy.records import (
     QuarantineRecord,
+    QuarantineStore,
     close,
     expire_overdue,
     list_quarantines,
@@ -43,6 +44,7 @@ __all__ = [
     "QuarantineRecommendation",
     "QuarantineRecord",
     "QuarantineState",
+    "QuarantineStore",
     "RefusalReason",
     "close",
     "consecutive_clean_runs",
