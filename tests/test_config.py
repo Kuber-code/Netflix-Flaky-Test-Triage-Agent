@@ -102,12 +102,20 @@ def test_api_key_comes_from_env_only(monkeypatch: pytest.MonkeyPatch) -> None:
     assert api_key_from_env() == "sk-ant-test"
 
 
-def test_config_schema_has_no_api_key_field() -> None:
-    """A key that cannot be configured cannot be committed by accident."""
+def test_config_schema_has_no_credential_field() -> None:
+    """A key that cannot be configured cannot be committed by accident.
+
+    Matched against specific credential-shaped names rather than any name
+    containing "token" -- ``max_output_tokens`` is a token *count*, and a test
+    that cannot tell the difference would either fail on a legitimate field or be
+    weakened until it caught nothing.
+    """
+    forbidden = ("api_key", "apikey", "secret", "password", "credential", "auth_token")
     fields = {
         name
         for section in Config().__dict__.values()
         if hasattr(section, "__dict__")
         for name in section.__dict__
     }
-    assert not any("key" in name or "token" in name or "secret" in name for name in fields)
+    offenders = [name for name in fields if any(pattern in name.lower() for pattern in forbidden)]
+    assert offenders == []

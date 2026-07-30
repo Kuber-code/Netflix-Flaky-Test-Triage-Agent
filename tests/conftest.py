@@ -19,6 +19,18 @@ def _quiet_logging() -> Iterator[None]:
     obs_logging.reset_for_testing()
 
 
+@pytest.fixture(autouse=True)
+def _no_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Guarantee the suite never makes a real API call.
+
+    Without this, running the tests on a developer machine that happens to export
+    ANTHROPIC_API_KEY would silently spend money and make results depend on a
+    network. Every LLM behaviour is tested against a scripted client instead; the
+    tests that need a key ask for it explicitly.
+    """
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+
 @pytest.fixture
 def repo_root() -> Path:
     return REPO_ROOT

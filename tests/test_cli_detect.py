@@ -130,11 +130,19 @@ def test_triage_no_llm_produces_a_report_with_zero_api_calls(workspace: Path) ->
     assert "classifier" not in output
 
 
-def test_triage_says_when_the_classifier_is_unavailable(workspace: Path) -> None:
+def test_triage_without_a_key_says_so_and_still_reports(workspace: Path) -> None:
+    """A missing key is a mode, not an error -- but it must be visible.
+
+    Otherwise the report looks like a full triage that happened to find no causes.
+    """
+    code, output = invoke(workspace, "triage")
+    assert code == 1  # no store yet
     seed_flaky(workspace)
+
     code, output = invoke(workspace, "triage")
     assert code == 0, output
-    assert "classifier arrives in phase P4" in output
+    assert "no ANTHROPIC_API_KEY" in output
+    assert "test_login" in output  # the deterministic report is still produced
 
 
 def test_triage_can_be_scoped_to_a_commit(workspace: Path) -> None:

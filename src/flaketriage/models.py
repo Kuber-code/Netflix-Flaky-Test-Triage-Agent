@@ -52,6 +52,88 @@ class Outcome(StrEnum):
         return self is not Outcome.SKIP
 
 
+class CauseCode(StrEnum):
+    """The fixed cause taxonomy (§4).
+
+    Lives here rather than in :mod:`flaketriage.classify` because it is shared
+    vocabulary: the policy engine decides on it, the renderers display it, and the
+    eval harness scores against it. Only the machinery that *calls a model* is
+    confined to the classifier package -- see ADR-0001 -- and an enum is not
+    machinery.
+    """
+
+    RACE_CONDITION = "RACE_CONDITION"
+    TIMING_DEPENDENCY = "TIMING_DEPENDENCY"
+    TEST_ORDER_DEPENDENCY = "TEST_ORDER_DEPENDENCY"
+    EXTERNAL_DEPENDENCY = "EXTERNAL_DEPENDENCY"
+    SHARED_STATE_LEAK = "SHARED_STATE_LEAK"
+    RESOURCE_EXHAUSTION = "RESOURCE_EXHAUSTION"
+    INFRA_FLAKE = "INFRA_FLAKE"
+    REAL_REGRESSION = "REAL_REGRESSION"
+    UNKNOWN = "UNKNOWN"
+
+    @property
+    def is_flake_category(self) -> bool:
+        """Whether this cause describes a flaky test.
+
+        ``REAL_REGRESSION`` is a defect, not a flake. ``INFRA_FLAKE`` is not the
+        test's fault. ``UNKNOWN`` is not a claim. The policy engine relies on all
+        three being excluded here to never quarantine a regression.
+        """
+        return self not in {
+            CauseCode.REAL_REGRESSION,
+            CauseCode.INFRA_FLAKE,
+            CauseCode.UNKNOWN,
+        }
+
+
+class DowngradeReason(StrEnum):
+    """Why a classification became ``UNKNOWN``. Always recorded, never inferred."""
+
+    NONE = "none"
+    INVALID_JSON = "invalid_json"
+    SCHEMA_INVALID = "schema_invalid"
+    UNKNOWN_CAUSE = "unknown_cause"
+    BELOW_CONFIDENCE_FLOOR = "below_confidence_floor"
+    NO_EVIDENCE = "no_evidence"
+    MODEL_ABSTAINED = "model_abstained"
+    BUDGET_EXHAUSTED = "budget_exhausted"
+    PREFILTERED = "prefiltered"
+    API_ERROR = "api_error"
+    LLM_DISABLED = "llm_disabled"
+    EMPTY_RESPONSE = "empty_response"
+
+
+class Classification(Frozen):
+    """A validated, guardrailed cause proposal.
+
+    ``cause`` is only ever a taxonomy member, ``evidence`` is only ever non-empty
+    when ``cause`` is not ``UNKNOWN``, and ``downgrade_reason`` explains any gap
+    between what the model said and what is reported.
+    """
+
+    cause: CauseCode = CauseCode.UNKNOWN
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    reasoning: str = ""
+    evidence: tuple[str, ...] = ()
+    suggested_action: str = ""
+    abstained: bool = True
+    downgrade_reason: DowngradeReason = DowngradeReason.NONE
+
+    # Reproducibility: which model and which prompt produced this.
+    model: str = ""
+    prompt_version: str = ""
+
+    @property
+    def is_abstention(self) -> bool:
+        return self.abstained or self.cause is CauseCode.UNKNOWN
+
+    @property
+    def is_actionable(self) -> bool:
+        """Whether policy may treat this as evidence about a flake."""
+        return not self.is_abstention and self.cause.is_flake_category
+
+
 class ChangeType(StrEnum):
     ADDED = "added"
     MODIFIED = "modified"

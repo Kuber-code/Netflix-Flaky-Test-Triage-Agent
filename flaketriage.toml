@@ -92,6 +92,29 @@ cache_path = ".flaketriage/cache"
 # extraction, to bound both cost and context dilution.
 trace_budget_chars = 2000
 
+# Response ceiling. The output is a small JSON object; a large ceiling only buys
+# room for a runaway generation to cost money.
+max_output_tokens = 700
+
+# The cheap-model gate. Disable to send every candidate straight to the
+# classifier, which is what the eval harness does when measuring what the gate
+# costs in accuracy.
+prefilter_enabled = true
+prefilter_max_output_tokens = 8
+
+request_timeout_seconds = 60.0
+api_max_retries = 2
+
+# USD per million tokens, [input, output].
+#
+# Verify against the current published price list before trusting a cost figure.
+# These live in config rather than in code because published prices change, and a
+# number baked into source is a number nobody re-checks.
+[classify.prices]
+"claude-haiku-4-5" = [1.0, 5.0]
+"claude-sonnet-5" = [3.0, 15.0]
+"claude-opus-5" = [15.0, 75.0]
+
 [policy]
 # Quarantine is recommended only when every condition in §6.6 holds.
 quarantine_flake_rate = 0.05

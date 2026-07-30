@@ -17,6 +17,7 @@ from rich.console import Console
 from rich.table import Table
 
 from flaketriage.detect.models import Confidence, Detection, Verdict
+from flaketriage.models import Classification
 
 # Verdicts, in the order a reader should care about them. Regressions first:
 # a real defect misfiled as noise is the expensive outcome.
@@ -56,9 +57,14 @@ def sort_for_report(detections: Sequence[Detection]) -> list[Detection]:
     )
 
 
-def to_dict(detection: Detection) -> dict[str, Any]:
-    """One detection as a JSON-serializable record."""
-    return {
+def to_dict(detection: Detection, classification: Classification | None = None) -> dict[str, Any]:
+    """One detection as a JSON-serializable record.
+
+    The classification is nested under its own key rather than flattened in, so a
+    consumer can never mistake a model's proposed cause for a deterministic
+    finding. That separation is the whole design position -- see ADR-0001.
+    """
+    record: dict[str, Any] = {
         "test": detection.identity.display_name,
         "identity_id": detection.identity_id,
         "fingerprint": detection.identity.fingerprint,
@@ -91,14 +97,36 @@ def to_dict(detection: Detection) -> dict[str, Any]:
         "failing_shards": list(detection.failing_shards),
         "merged_uncertain": detection.merged_uncertain,
     }
+    if classification is not None:
+        record["classification"] = {
+            "cause": classification.cause.value,
+            "confidence": round(classification.confidence, 3),
+            "reasoning": classification.reasoning,
+            "evidence": list(classification.evidence),
+            "suggested_action": classification.suggested_action,
+            "abstained": classification.abstained,
+            "downgrade_reason": classification.downgrade_reason.value,
+            "model": classification.model,
+            "prompt_version": classification.prompt_version,
+        }
+    return record
 
 
-def render_json(detections: Sequence[Detection], *, llm_enabled: bool = False) -> str:
+def render_json(
+    detections: Sequence[Detection],
+    *,
+    llm_enabled: bool = False,
+    classifications: dict[int, Classification] | None = None,
+) -> str:
+    resolved = classifications or {}
     payload = {
         "schema_version": 1,
         "llm_enabled": llm_enabled,
         "summary": summarize(detections),
-        "detections": [to_dict(detection) for detection in sort_for_report(detections)],
+        "detections": [
+            to_dict(detection, resolved.get(detection.identity_id))
+            for detection in sort_for_report(detections)
+        ],
     }
     return json.dumps(payload, indent=2, sort_keys=False)
 
@@ -113,7 +141,11 @@ def summarize(detections: Sequence[Detection]) -> dict[str, int]:
 
 
 def render_terminal(
-    detections: Sequence[Detection], console: Console, *, show_healthy: bool = False
+    detections: Sequence[Detection],
+    console: Console,
+    *,
+    show_healthy: bool = False,
+    classifications: dict[int, Classification] | None = None,
 ) -> None:
     """Print a table of findings. Healthy tests are hidden unless asked for."""
     rows = [
@@ -129,11 +161,14 @@ def render_terminal(
         )
         return
 
+    resolved = classifications or {}
     table = Table(box=None, pad_edge=False)
     table.add_column("verdict")
     table.add_column("conf")
     table.add_column("rate", justify="right")
     table.add_column("obs", justify="right")
+    if resolved:
+        table.add_column("cause (proposed)")
     table.add_column("test", overflow="fold")
 
     for detection in rows:
@@ -141,21 +176,25 @@ def render_terminal(
         name = detection.identity.display_name
         if detection.merged_uncertain:
             name += " [dim](merged_uncertain)[/dim]"
-        table.add_row(
+        cells = [
             f"[{style}]{detection.verdict.value}[/{style}]" if style else detection.verdict.value,
             f"[{_CONFIDENCE_STYLE[detection.confidence]}]{detection.confidence.value}[/]"
             if _CONFIDENCE_STYLE[detection.confidence]
             else detection.confidence.value,
             f"{detection.flake_rate:.0%}" if detection.observations else "-",
             str(detection.observations),
-            name,
-        )
+        ]
+        if resolved:
+            cells.append(_cause_cell(resolved.get(detection.identity_id)))
+        cells.append(name)
+        table.add_row(*cells)
 
     console.print(table)
     console.print()
 
     for detection in rows:
-        if not detection.signals:
+        classification = resolved.get(detection.identity_id)
+        if not detection.signals and classification is None:
             continue
         console.print(f"[bold]{detection.identity.display_name}[/bold]")
         for evidence in detection.signals:
@@ -165,6 +204,8 @@ def render_terminal(
                 f"  - regression pivots on {detection.regression_sha[:12]}; "
                 "not eligible for quarantine"
             )
+        if classification is not None:
+            _print_classification(console, classification)
         console.print()
 
     counts = summarize(detections)
@@ -179,8 +220,54 @@ def render_terminal(
     )
 
 
+def _cause_cell(classification: Classification | None) -> str:
+    """One-cell rendering of a proposed cause."""
+    if classification is None:
+        return "[dim]-[/dim]"
+    if classification.is_abstention:
+        return f"[dim]UNKNOWN ({classification.downgrade_reason.value})[/dim]"
+    return f"{classification.cause.value} [dim]{classification.confidence:.0%}[/dim]"
+
+
+def _print_classification(console: Console, classification: Classification) -> None:
+    """A proposed cause is labelled as a proposal, per ADR-0001.
+
+    The wording matters more than it looks: a cause printed without qualification
+    in the same table as a deterministic verdict reads as an equally solid finding,
+    which is exactly the conflation this project exists to avoid.
+    """
+    if classification.is_abstention:
+        detail = f": {classification.reasoning}" if classification.reasoning else ""
+        console.print(
+            f"  - [dim]cause: UNKNOWN ({classification.downgrade_reason.value}){detail}[/dim]"
+        )
+        return
+    console.print(
+        f"  - proposed cause: {classification.cause.value} "
+        f"(model confidence {classification.confidence:.0%}, advisory only)"
+    )
+    if classification.reasoning:
+        console.print(f"    {classification.reasoning}")
+    for item in classification.evidence:
+        console.print(f"    evidence: {item}")
+    if classification.suggested_action:
+        console.print(f"    suggested: {classification.suggested_action}")
+
+
+def _markdown_cause(classification: Classification | None) -> str:
+    if classification is None:
+        return "-"
+    if classification.is_abstention:
+        return f"UNKNOWN (`{classification.downgrade_reason.value}`)"
+    return f"`{classification.cause.value}` {classification.confidence:.0%}"
+
+
 def render_markdown(
-    detections: Sequence[Detection], *, max_rows: int = 10, llm_enabled: bool = False
+    detections: Sequence[Detection],
+    *,
+    max_rows: int = 10,
+    llm_enabled: bool = False,
+    classifications: dict[int, Classification] | None = None,
 ) -> str:
     """Markdown suitable for a PR comment.
 
@@ -223,16 +310,23 @@ def render_markdown(
         lines.append(f"{len(flaky)} further failure(s) appear unrelated to your change.")
     lines.append("")
 
-    lines.append("| verdict | confidence | flake rate | test |")
-    lines.append("|---|---|---|---|")
+    resolved = classifications or {}
+    if resolved:
+        lines.append("| verdict | confidence | flake rate | proposed cause | test |")
+        lines.append("|---|---|---|---|---|")
+    else:
+        lines.append("| verdict | confidence | flake rate | test |")
+        lines.append("|---|---|---|---|")
     for detection in rows[:max_rows]:
         name = detection.identity.display_name
         if detection.merged_uncertain:
             name += " _(merged_uncertain)_"
         rate = f"{detection.flake_rate:.0%}" if detection.observations else "-"
-        lines.append(
-            f"| {detection.verdict.value} | {detection.confidence.value} | {rate} | `{name}` |"
-        )
+        cells = [detection.verdict.value, detection.confidence.value, rate]
+        if resolved:
+            cells.append(_markdown_cause(resolved.get(detection.identity_id)))
+        cells.append(f"`{name}`")
+        lines.append("| " + " | ".join(cells) + " |")
 
     if len(rows) > max_rows:
         lines.append("")
@@ -247,9 +341,31 @@ def render_markdown(
             lines.append(f"- pivots on commit `{detection.regression_sha[:12]}`")
         if not detection.signals and not detection.regression_sha:
             lines.append("- no flake signal fired; insufficient history to classify")
+        classification = resolved.get(detection.identity_id)
+        if classification is not None and not classification.is_abstention:
+            lines.append(
+                f"- proposed cause `{classification.cause.value}` "
+                f"({classification.confidence:.0%} model confidence, advisory only): "
+                f"{classification.reasoning}"
+            )
+            for item in classification.evidence:
+                lines.append(f"  - evidence: {item}")
+            if classification.suggested_action:
+                lines.append(f"  - suggested: {classification.suggested_action}")
+        elif classification is not None:
+            lines.append(
+                f"- cause `UNKNOWN` (`{classification.downgrade_reason.value}`); "
+                "no cause is proposed"
+            )
         lines.append("")
     if not llm_enabled:
         lines.append("_Deterministic detection only; the cause classifier was not run._")
+        lines.append("")
+    else:
+        lines.append(
+            "_Causes are proposed by a model and are advisory. Quarantine decisions "
+            "are made by deterministic policy._"
+        )
         lines.append("")
     lines.extend(["</details>", ""])
 

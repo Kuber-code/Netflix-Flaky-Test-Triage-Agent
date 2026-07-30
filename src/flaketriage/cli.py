@@ -20,11 +20,12 @@ from rich.console import Console
 from rich.table import Table
 
 from flaketriage import __version__
-from flaketriage.config import Config, load_config
+from flaketriage.classify import build_classifier
+from flaketriage.config import Config, api_key_from_env, load_config
 from flaketriage.detect import Detection, detect_all
 from flaketriage.ingest import expand_result_paths, parse_diff_file
 from flaketriage.ingest import ingest as run_ingest
-from flaketriage.models import RunMetadata
+from flaketriage.models import Classification, RunMetadata
 from flaketriage.obs import configure_logging
 from flaketriage.report import render_json, render_markdown, render_terminal
 from flaketriage.report.window import InvalidWindowError, cutoff_iso
@@ -262,18 +263,40 @@ def triage(
     ] = None,
 ) -> None:
     """Detect flakes and, unless --no-llm is given, classify their likely cause."""
-    del budget_usd, max_tests  # consumed by the classifier in phase P6
     detections = _run_detection(since, sha=sha)
 
-    if not no_llm:
-        # The classifier is not built yet. Saying so is better than silently
-        # producing deterministic-only output that looks like a full triage.
-        stderr.print(
-            "[yellow]note[/yellow] the cause classifier arrives in phase P4; "
-            "reporting deterministic results only. Pass --no-llm to silence this."
-        )
+    if no_llm:
+        _emit(detections, output_format, llm_enabled=False, out=out)
+        return
 
-    _emit(detections, output_format, llm_enabled=False, out=out)
+    if api_key_from_env() is None:
+        # A missing key is a mode, not an error -- but it must be visible, or the
+        # report looks like a full triage that simply found no causes.
+        stderr.print(
+            "[yellow]note[/yellow] no ANTHROPIC_API_KEY in the environment; "
+            "reporting deterministic results only."
+        )
+        _emit(detections, output_format, llm_enabled=False, out=out)
+        return
+
+    classifier = build_classifier(state.config, budget_usd=budget_usd)
+    candidates = [detection for detection in detections if detection.needs_classification]
+    classifications = classifier.classify_many(candidates, max_tests=max_tests)
+
+    stats = classifier.stats
+    stderr.print(
+        f"[dim]classified {len(candidates)} test(s): {stats.api_calls} API call(s), "
+        f"{stats.cache_hits} cache hit(s), {stats.prefiltered} prefiltered, "
+        f"${stats.total_cost_usd:.4f}[/dim]"
+    )
+
+    _emit(
+        detections,
+        output_format,
+        llm_enabled=True,
+        out=out,
+        classifications=classifications,
+    )
 
 
 @app.command()
@@ -325,6 +348,7 @@ def _emit(
     *,
     llm_enabled: bool,
     out: Path | None = None,
+    classifications: dict[int, Classification] | None = None,
 ) -> None:
     """Write the report in the requested format, to ``out`` or to stdout."""
     fmt = output_format.strip().lower()
@@ -333,16 +357,19 @@ def _emit(
         if out is not None:
             stderr.print("[red]--out is only meaningful with --format json or markdown.[/red]")
             raise typer.Exit(1)
-        render_terminal(detections, stdout)
+        render_terminal(detections, stdout, classifications=classifications)
         return
 
     if fmt == "json":
-        text = render_json(detections, llm_enabled=llm_enabled) + "\n"
+        text = (
+            render_json(detections, llm_enabled=llm_enabled, classifications=classifications) + "\n"
+        )
     elif fmt == "markdown":
         text = render_markdown(
             detections,
             max_rows=state.config.report.pr_comment_max_rows,
             llm_enabled=llm_enabled,
+            classifications=classifications,
         )
     else:
         stderr.print(

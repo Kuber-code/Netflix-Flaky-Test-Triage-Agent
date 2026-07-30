@@ -34,10 +34,10 @@ JUnit XML + git diff + run metadata
      separate regression path, confidence levels
               |
               v
-   prefilter / content-addressed cache        (P6)
+   prefilter / content-addressed cache
               |
               v
-   LLM classifier: proposes a cause           (P4)
+   LLM classifier: proposes a cause
      strict schema, repair retry, abstain path
               |
               v
@@ -169,6 +169,23 @@ on purpose — both signals changed, so there is no evidence distinguishing it f
 an unrelated deletion plus addition. See
 [ADR-0002](docs/adr/0002-test-identity-strategy.md).
 
+### Abstention is a correct answer
+
+`UNKNOWN` is a first-class member of the taxonomy, and four mechanisms route to
+it: the prompt says so explicitly, evidence is mandatory for any non-`UNKNOWN`
+cause, classifications below a configurable confidence floor are downgraded, and
+every failure mode — malformed JSON, an invented cause code, an API outage, an
+exhausted budget — ends in `UNKNOWN` with a distinct machine-readable reason
+rather than an exception.
+
+The reasoning is specific to how the output is used. In the table an engineer
+reads while deciding whether to investigate a red build, a wrong
+`RACE_CONDITION` and a right one look identical. `UNKNOWN` costs a reader a few
+seconds; a plausible wrong cause costs them the investigation they would otherwise
+have done. See [ADR-0003](docs/adr/0003-abstention-over-guessing.md), which also
+records what this cost in practice — the first prefilter prompt silently rejected
+a `ConnectionResetError` with a full stack trace.
+
 ### How the flake rate is computed
 
 Two decisions here are worth stating because both are easy to get wrong in a way
@@ -201,7 +218,7 @@ JSON output rather than being averaged into one indistinguishable number.
 | P1 | Ingest: JUnit XML, diff parser, SQLite schema, `ingest` | done |
 | P2 | Identity: alias resolution across renames and moves | done |
 | P3 | Detector: four signals, regression path, confidence, `detect`/`report` | done |
-| P4 | Classifier: schema validation, repair retry, abstention, cache | pending |
+| P4 | Classifier: schema validation, repair retry, abstention, cache, prefilter | done |
 | P5 | Evaluation harness, labeled corpus, baseline, results table | pending |
 | P6 | Cost controls: prefilter, budget cap, cost accounting | pending |
 | P7 | Policy engine: quarantine rules, TTL, ownership, de-quarantine | pending |
@@ -211,6 +228,34 @@ JSON output rather than being averaged into one indistinguishable number.
 Unimplemented CLI commands exit non-zero with an explicit message. They do not
 exit 0 and return nothing, because a missing feature that looks like an empty
 result is worse than a missing feature.
+
+## Cost and latency
+
+Measured against the real API on a two-test corpus, cold cache:
+
+| call | model | input tok | output tok | cost | latency |
+|---|---|---|---|---|---|
+| prefilter | `claude-haiku-4-5` | 539 | 8 | $0.00058 | 1.1s |
+| classify | `claude-sonnet-5` | 2498 | 362 | $0.01292 | 4.2s |
+
+**~$0.0134 per classified test** cold; **$0.00 warm** — a second identical
+invocation was a 100% cache hit. The input side of the classify call dominates and
+most of it is the system prompt carrying the taxonomy, so context assembly is the
+cost lever rather than output length. Prompt caching for that stable block is the
+obvious next step and is deliberately unbuilt until P5 can measure the saving.
+
+Three constraints found by calling the API rather than by assuming, all recorded in
+[ADR-0005](docs/adr/0005-two-tier-model-cost-strategy.md):
+
+- **`claude-sonnet-5` rejects `temperature`** with a 400. The client drops it and
+  retries, remembering the model. So the spec's "temperature 0 for reproducibility"
+  is not fully available on the configured classifier; attributability comes from
+  the recorded model id and prompt-version hash instead.
+- **The structured-output schema dialect is a subset of JSON Schema** — `minimum`
+  and `maximum` on a number are rejected. That is the concrete reason the Pydantic
+  validation layer is not redundant with the API's own enforcement.
+- **The first content block is not necessarily text.** A reasoning model emits a
+  thinking block first, so `content[0].text` is a latent crash.
 
 ## Results
 

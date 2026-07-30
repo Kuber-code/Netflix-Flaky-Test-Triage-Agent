@@ -87,6 +87,21 @@ class ClassifyConfig(_Section):
     max_tests: int = Field(default=25, ge=1)
     cache_path: Path = Path(".flaketriage/cache")
     trace_budget_chars: int = Field(default=2000, ge=200)
+    max_output_tokens: int = Field(default=700, ge=64)
+    prefilter_enabled: bool = True
+    prefilter_max_output_tokens: int = Field(default=8, ge=1)
+    request_timeout_seconds: float = Field(default=60.0, gt=0.0)
+    api_max_retries: int = Field(default=2, ge=0)
+
+    # USD per million tokens, [input, output]. Verify against the current
+    # published price list; see pricing.py for why these are not in code.
+    prices: dict[str, list[float]] = Field(
+        default_factory=lambda: {
+            "claude-haiku-4-5": [1.0, 5.0],
+            "claude-sonnet-5": [3.0, 15.0],
+            "claude-opus-5": [15.0, 75.0],
+        }
+    )
 
 
 class PolicyConfig(_Section):
