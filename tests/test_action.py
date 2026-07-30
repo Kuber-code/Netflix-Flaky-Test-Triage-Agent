@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import typer.main
 import yaml
 from typer.testing import CliRunner
 
@@ -98,11 +99,26 @@ def test_the_upsert_marker_matches_the_renderer() -> None:
     assert COMMENT_MARKER in action_text()
 
 
+def declared_options(command_name: str) -> set[str]:
+    """Option strings a command actually accepts.
+
+    Read off the Click command objects rather than out of rendered ``--help``
+    text. The first version of this test grepped the help output and was itself
+    flaky: rich wraps to the terminal width, so a flag that was visible locally
+    was truncated on CI's narrower terminal. Introspection has no width.
+    """
+    group = typer.main.get_command(app)
+    commands = getattr(group, "commands", None)
+    assert commands is not None, "the CLI root must be a command group"
+    command = commands[command_name]
+    return {opt for param in command.params for opt in param.opts}
+
+
 def test_the_cli_flags_the_action_passes_all_exist() -> None:
-    """Each flag is checked against the real --help output."""
-    flags = {
-        "ingest": ["--results", "--sha", "--run-id", "--attempt", "--branch", "--shard", "--diff"],
-        "triage": [
+    """Every flag action.yml passes must be one the command accepts."""
+    expected = {
+        "ingest": {"--results", "--sha", "--run-id", "--attempt", "--branch", "--shard", "--diff"},
+        "triage": {
             "--since",
             "--sha",
             "--no-llm",
@@ -110,16 +126,17 @@ def test_the_cli_flags_the_action_passes_all_exist() -> None:
             "--max-tests",
             "--format",
             "--out",
-        ],
-        "report": ["--since", "--format", "--out"],
+        },
+        "report": {"--since", "--format", "--out"},
     }
     text = action_text()
-    for command, expected in flags.items():
-        result = runner.invoke(app, [command, "--help"])
-        assert result.exit_code == 0, result.output
-        for flag in expected:
+    for command_name, flags in expected.items():
+        accepted = declared_options(command_name)
+        for flag in flags:
             if flag in text:
-                assert flag in result.output, f"{command} has no {flag}, but action.yml passes it"
+                assert flag in accepted, (
+                    f"action.yml passes {flag} to {command_name}, which does not accept it"
+                )
 
 
 def test_the_action_installs_the_checked_out_copy_by_default() -> None:
@@ -167,3 +184,21 @@ def test_the_self_triage_workflow_exercises_two_attempts() -> None:
     text = (WORKFLOWS / "self-triage.yml").read_text(encoding="utf-8")
     assert 'attempt: "1"' in text
     assert 'attempt: "2"' in text
+
+
+def test_option_introspection_is_terminal_width_independent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The reason this test file introspects instead of grepping help text.
+
+    The first version parsed rendered --help output and passed locally while
+    failing on CI, because rich wraps to the terminal width and the flag it was
+    looking for was truncated. In a project about flaky tests, that was an
+    embarrassing way to learn the lesson.
+    """
+    monkeypatch.setenv("COLUMNS", "20")
+    narrow = declared_options("ingest")
+    monkeypatch.setenv("COLUMNS", "400")
+    wide = declared_options("ingest")
+    assert narrow == wide
+    assert "--results" in narrow
