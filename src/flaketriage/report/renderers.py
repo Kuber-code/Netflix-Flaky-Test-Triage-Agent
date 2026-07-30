@@ -37,6 +37,9 @@ _VERDICT_STYLE: Final = {
     Verdict.HEALTHY: "green",
 }
 
+#: Hidden HTML marker identifying a comment this tool owns.
+COMMENT_MARKER: Final = "<!-- flaketriage:report -->"
+
 _CONFIDENCE_STYLE: Final = {
     Confidence.HIGH: "bold",
     Confidence.MEDIUM: "",
@@ -285,7 +288,10 @@ def render_markdown(
         if detection.verdict is not Verdict.HEALTHY
     ]
 
-    lines: list[str] = ["### Flaky test triage", ""]
+    # A stable marker so the Action can find and *update* its previous comment
+    # instead of adding another. A bot that posts a fresh comment on every push is
+    # a bot that gets muted, and a muted bot has no effect on anything.
+    lines: list[str] = [COMMENT_MARKER, "### Flaky test triage", ""]
 
     if not rows:
         lines.append("No flakes, regressions or unexplained failures were detected.")

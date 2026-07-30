@@ -1,0 +1,69 @@
+# Example: triage this pull request's test failures and comment once.
+#
+# The shape that matters is the ordering: run the tests, keep going when they
+# fail, then triage. A triage step guarded by `if: success()` never runs on the
+# only builds that need it.
+name: example-triage
+
+on:
+  pull_request:
+
+# Least privilege. The action needs to read the code and write one comment;
+# it never pushes, and it never changes CI configuration.
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  test-and-triage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Needed by the last-committer owner fallback, and by --diff.
+          fetch-depth: 0
+
+      - name: Run the suite
+        id: suite
+        # `|| true` rather than `continue-on-error`, so a genuine tooling failure
+        # in a later step still fails the job.
+        run: |
+          mkdir -p reports
+          pytest --junitxml=reports/junit.xml || true
+
+      # The store holds the execution history every signal is computed from, so it
+      # has to outlive the job. A cache is the cheapest way to demonstrate that and
+      # the wrong answer in production: caches are best-effort, scoped per branch,
+      # and evicted without warning, so history will silently vanish. A real
+      # deployment points `[store] path` at shared storage. See the README's
+      # limitations.
+      - name: Restore run store
+        uses: actions/cache@v4
+        with:
+          path: .flaketriage
+          key: flaketriage-store-${{ github.run_id }}
+          restore-keys: |
+            flaketriage-store-
+
+      - name: Produce the diff under test
+        run: |
+          git diff --unified=0 --no-color \
+            "${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}" \
+            > change.patch || true
+
+      - name: Triage
+        uses: Kuber-code/Netflix-Flaky-Test-Triage-Agent@main
+        with:
+          results: reports
+          diff: change.patch
+          # Omit the key and the deterministic detector still produces a complete
+          # report -- the proposed cause is the only thing missing.
+          anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          budget-usd: "0.50"
+          max-tests: "25"
+
+      # Report, do not gate. Turning triage into a required check is a deliberate
+      # decision a team should make on its own evidence, not a default.
+      - name: Fail if the suite actually failed
+        if: ${{ steps.suite.outcome == 'failure' }}
+        run: exit 1

@@ -222,7 +222,7 @@ JSON output rather than being averaged into one indistinguishable number.
 | P5 | Evaluation harness, labeled corpus, baseline, results table | done |
 | P6 | Cost controls and observability: `stats`, Prometheus output | done |
 | P7 | Policy engine: quarantine rules, TTL, ownership, de-quarantine | done |
-| P8 | Interfaces: PR comment renderer, `action.yml` | pending |
+| P8 | Interfaces: PR comment renderer, `action.yml`, example workflow | done |
 | P9 | Docs: README as design doc, ARCHITECTURE, ADRs | pending |
 
 Unimplemented CLI commands exit non-zero with an explicit message. They do not
@@ -366,6 +366,38 @@ responses. 2 example(s) were stopped by the cheap-model gate.
 - 49 examples is small. One reclassified example moves overall accuracy about two
   points, so differences of a few points are noise.
 
+## GitHub Action
+
+```yaml
+- uses: Kuber-code/Netflix-Flaky-Test-Triage-Agent@main
+  with:
+    results: reports
+    anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}   # optional
+```
+
+`results` is the only required input. Omit the key and the deterministic detector
+still produces a complete report — only the proposed cause is missing.
+
+Details that matter more than the YAML:
+
+- **The comment is updated, not re-posted.** A hidden marker identifies the
+  action's own comment and the upsert edits it. A bot that posts a fresh comment on
+  every push gets muted, and a muted bot has no effect on anything — which is why
+  brevity here is a functional requirement rather than a stylistic one.
+- **`attempt` defaults to `github.run_attempt`**, not to 1. A pipeline that reports
+  every retry as attempt 1 throws away the strongest flake signal there is.
+- **It reports; it does not gate.** `fail-on-regression` exists and defaults to
+  off. Turning triage into a required check should be a team's deliberate decision
+  on their own evidence.
+- **It runs on this repository's own tests** via
+  [`.github/workflows/self-triage.yml`](.github/workflows/self-triage.yml), which
+  asserts on the artifacts the action produces — an action that has never executed
+  is a YAML file with good intentions. That workflow needs no secret, so it works
+  on forks.
+- **A test guards the couplings** between `action.yml` and the CLI: the JSON keys
+  it reads, the comment marker its upsert depends on, and every flag it passes.
+  An Action breaks in someone else's repository with nobody watching the log.
+
 ## Limitations
 
 Stated up front because they bound what any results figure can mean.
@@ -380,8 +412,16 @@ Stated up front because they bound what any results figure can mean.
    distinct tests. Uncertain merges are marked rather than hidden, but they are
    still merges.
 4. Single-repo scope. No multi-tenancy, no auth, no access control.
-5. Not validated against a production test suite. Deploying it would warrant a
+5. **The run store must outlive the CI job**, and the example workflow uses
+   `actions/cache` to demonstrate that, which is the wrong answer in production.
+   Caches are best-effort, scoped per branch, and evicted without warning — so
+   history will silently vanish and flake rates will silently reset. A real
+   deployment points `[store] path` at shared storage.
+6. Not validated against a production test suite. Deploying it would warrant a
    shadow-mode period in which recommendations are logged and not acted on.
+7. **Quarantine granularity is per-test**, which is the wrong unit for an
+   order-dependency flake: that failure is a property of a *pair* of tests, and
+   quarantining whichever one happened to fail treats a symptom.
 
 ## Configuration
 

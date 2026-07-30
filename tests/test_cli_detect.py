@@ -8,6 +8,7 @@ import pytest
 from typer.testing import CliRunner
 
 from flaketriage.cli import app
+from flaketriage.report import COMMENT_MARKER
 
 runner = CliRunner()
 
@@ -108,7 +109,8 @@ def test_report_markdown_is_emitted_verbatim(workspace: Path) -> None:
     seed_flaky(workspace)
     code, output = invoke(workspace, "report", "--format", "markdown")
     assert code == 0, output
-    assert output.startswith("### Flaky test triage")
+    assert output.startswith(COMMENT_MARKER)
+    assert "### Flaky test triage" in output
     assert "| verdict | confidence | flake rate | test |" in output
 
 
@@ -230,7 +232,8 @@ def test_out_writes_utf8_markdown_to_a_file(workspace: Path) -> None:
     code, output = invoke(workspace, "report", "--format", "markdown", "--out", str(target))
     assert code == 0, output
     text = target.read_text(encoding="utf-8")
-    assert text.startswith("### Flaky test triage")
+    assert text.startswith(COMMENT_MARKER), "the Action finds its own comment by this marker"
+    assert "### Flaky test triage" in text
     assert text.isascii(), "PR comment markdown must be ASCII-only"
 
 

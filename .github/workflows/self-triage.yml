@@ -1,0 +1,106 @@
+# The action, run on this repository's own test suite.
+#
+# This is the phase P8 exit criterion, and it is worth more than the example
+# workflow: an action that has never executed is a YAML file with good intentions.
+# It runs deterministically (no API key, so no spend and no secret needed on forks)
+# and asserts on the artifacts, so a broken action fails here rather than in
+# somebody else's repository.
+name: self-triage
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  triage-own-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Run the suite
+        run: |
+          mkdir -p reports
+          uv sync --all-groups --frozen
+          # Two attempts of the same commit, so same-SHA divergence is observable
+          # at all. A pipeline that never retries can only produce the weaker
+          # cross-commit signal, and this workflow should exercise the strong path.
+          uv run pytest --junitxml=reports/junit-1.xml || true
+          uv run pytest --junitxml=reports/junit-2.xml || true
+
+      - name: Restore run store
+        uses: actions/cache@v4
+        with:
+          path: .flaketriage
+          key: flaketriage-self-${{ github.run_id }}
+          restore-keys: |
+            flaketriage-self-
+
+      - name: Triage attempt 1
+        uses: ./
+        with:
+          results: reports/junit-1.xml
+          attempt: "1"
+          no-llm: "true"
+          comment: "false"
+
+      - name: Triage attempt 2
+        id: triage
+        uses: ./
+        with:
+          results: reports/junit-2.xml
+          attempt: "2"
+          no-llm: "true"
+          # Commented only on pull requests, and only once -- the action updates
+          # its previous comment rather than adding another.
+          comment: ${{ github.event_name == 'pull_request' }}
+
+      - name: Assert the action produced usable artifacts
+        run: |
+          set -euo pipefail
+          markdown='${{ steps.triage.outputs.markdown }}'
+          report='${{ steps.triage.outputs.json }}'
+
+          test -s "$markdown" || { echo "no markdown report"; exit 1; }
+          test -s "$report" || { echo "no json report"; exit 1; }
+
+          grep -q '<!-- flaketriage:report -->' "$markdown" \
+            || { echo "missing the comment marker the upsert relies on"; exit 1; }
+          grep -q '### Flaky test triage' "$markdown" || { echo "missing heading"; exit 1; }
+
+          # ASCII-only, because the comment is written to a file and posted through
+          # the API by tooling with no guaranteed encoding.
+          LC_ALL=C grep -qP '[^\x00-\x7F]' "$markdown" \
+            && { echo "PR comment markdown must be ASCII-only"; exit 1; } || true
+
+          python - "$report" <<'PY'
+          import json, sys
+          payload = json.load(open(sys.argv[1]))
+          assert payload["schema_version"] == 1, payload["schema_version"]
+          assert payload["llm_enabled"] is False, "no key was provided"
+          summary = payload["summary"]
+          for key in ("flaky", "regression", "healthy", "total"):
+              assert key in summary, key
+          print("summary:", summary)
+          PY
+
+          echo "flaky=${{ steps.triage.outputs.flaky }}"
+          echo "regressions=${{ steps.triage.outputs.regressions }}"
+          echo "has-findings=${{ steps.triage.outputs.has-findings }}"
+
+      - name: Show the metrics the tool records about itself
+        run: |
+          uv run flaketriage stats --since 30d
+          uv run flaketriage policy

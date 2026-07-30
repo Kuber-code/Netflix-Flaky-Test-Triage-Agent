@@ -24,6 +24,9 @@ dev = [
     "hypothesis>=6.122",
     "ruff>=0.8.4",
     "mypy>=1.14",
+    # Used only by the test that keeps action.yml consistent with the CLI.
+    "pyyaml>=6.0",
+    "types-pyyaml>=6.0",
 ]
 
 [build-system]

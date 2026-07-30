@@ -47,7 +47,7 @@ def test_no_command_is_a_stub() -> None:
     UNIMPLEMENTED_COMMANDS makes that a visible, reviewed change instead of a
     command that quietly exits 2.
     """
-    assert UNIMPLEMENTED_COMMANDS == frozenset()
+    assert frozenset() == UNIMPLEMENTED_COMMANDS
 
     for command in sorted(UNIMPLEMENTED_COMMANDS):
         result = runner.invoke(app, [command])
