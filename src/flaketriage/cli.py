@@ -10,6 +10,7 @@ stdout carries report data; stderr carries logs and diagnostics.
 
 from __future__ import annotations
 
+import subprocess  # fixed argv, shell=False
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -418,10 +419,31 @@ def evaluate(
     subset: Annotated[
         str | None, typer.Option("--subset", help="Restrict to one taxonomy class.")
     ] = None,
+    no_llm: Annotated[
+        bool, typer.Option("--no-llm", help="Baseline only; makes zero API calls.")
+    ] = False,
 ) -> None:
-    """Run the evaluation harness against the labeled corpus."""
-    del subset
-    _not_implemented("eval", "P5")
+    """Run the evaluation harness against the labeled corpus.
+
+    Delegates to ``eval/run_eval.py`` rather than reimplementing it, so `make eval`
+    and this command cannot produce different numbers.
+    """
+    script = Path(__file__).resolve().parents[2] / "eval" / "run_eval.py"
+    if not script.is_file():
+        stderr.print(
+            f"[red]Evaluation harness not found at[/red] {script}. "
+            "It ships with the repository, not with the installed package."
+        )
+        raise typer.Exit(1)
+
+    argv = [sys.executable, str(script)]
+    if subset:
+        argv += ["--subset", subset]
+    if no_llm:
+        argv.append("--no-llm")
+
+    completed = subprocess.run(argv, cwd=script.parent, check=False)  # noqa: S603
+    raise typer.Exit(completed.returncode)
 
 
 @app.command()

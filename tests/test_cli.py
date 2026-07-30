@@ -14,7 +14,7 @@ EXPECTED_COMMANDS = frozenset({"ingest", "detect", "triage", "report", "policy",
 
 # Commands whose behaviour is not built yet. They must fail explicitly rather
 # than exit 0 and look like an empty result. Shrinks as phases land.
-UNIMPLEMENTED_COMMANDS = frozenset({"policy", "eval", "stats"})
+UNIMPLEMENTED_COMMANDS = frozenset({"policy", "stats"})
 
 
 def test_version() -> None:
